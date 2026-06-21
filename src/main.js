@@ -1,21 +1,37 @@
 import './style.css';
-import { mountGame } from './game.js';
-import { mountBuilder } from './builder.js';
+import { mountGame, unmountGame } from './game.js';
+import { mountBuilder, unmountBuilder } from './builder.js';
 
 const app = document.querySelector('#app');
 
-// Two routes share the app shell: the game, and the level editor at #editor.
-// Switching between them reloads so each mounts cleanly (no leaked
-// global listeners); in-page anchors like #board don't count as a route change.
 const routeOf = () => {
   const h = location.hash.replace(/^#\/?/, '');
   return h === 'editor' ? 'editor' : 'game';
 };
 
-const current = routeOf();
-if (current === 'editor') mountBuilder(app);
-else mountGame(app);
+let activeRoute = null;
+let mounting = false;
 
-window.addEventListener('hashchange', () => {
-  if (routeOf() !== current) location.reload();
-});
+async function renderRoute() {
+  const route = routeOf();
+  if (route === activeRoute || mounting) return;
+  mounting = true;
+
+  if (activeRoute === 'game') unmountGame();
+  if (activeRoute === 'editor') unmountBuilder();
+  app.replaceChildren();
+
+  if (route === 'editor') {
+    mountBuilder(app);
+    activeRoute = 'editor';
+  } else {
+    await mountGame(app);
+    if (routeOf() === 'game') activeRoute = 'game';
+  }
+
+  mounting = false;
+  if (routeOf() !== activeRoute) renderRoute();
+}
+
+renderRoute();
+window.addEventListener('hashchange', renderRoute);

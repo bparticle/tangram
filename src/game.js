@@ -1,3 +1,4 @@
+import { trapFocus } from './a11y.js';
 import {
   PIECES, PIECE_BY_ID, ROT_SNAP, SNAP_VERTEX,
   sub, dot, cross, len, unit, dist, clamp, rotateVec,
@@ -48,8 +49,23 @@ let dragState = null;
 const history = [];
 
 let pieceLayer; let goalLayer; let guideLayer;
+let gameCleanup = null;
+let rulesTrapCleanup = null;
+let rulesReturnFocus = null;
+let completeTrapCleanup = null;
+let completeReturnFocus = null;
+
+export function unmountGame() {
+  gameCleanup?.();
+  gameCleanup = null;
+  rulesTrapCleanup?.();
+  rulesTrapCleanup = null;
+  completeTrapCleanup?.();
+  completeTrapCleanup = null;
+}
 
 export async function mountGame(root) {
+  unmountGame();
   root.innerHTML = '<main class="load-state"><p class="eyebrow">Tangram</p><strong>Loading levels…</strong></main>';
   try {
     levels = await listLevels();
@@ -84,7 +100,7 @@ export async function mountGame(root) {
     pieceLayer.appendChild(group);
   });
 
-  wireControls(root);
+  gameCleanup = wireControls(root);
   loadLevel(0);
 }
 
@@ -114,7 +130,7 @@ function loadLevel(index) {
   selected = null;
   selection.clear();
   dragState = null;
-  document.querySelector('#complete-screen').setAttribute('aria-hidden', 'true');
+  closeComplete();
   renderSilhouette();
   renderAssignment();
   updateMasthead();
@@ -799,7 +815,7 @@ function reset() {
   selected = null;
   selection.clear();
   dragState = null;
-  document.querySelector('#complete-screen').setAttribute('aria-hidden', 'true');
+  closeComplete();
   render();
   showNotice('Scramble restored.');
 }
@@ -926,6 +942,10 @@ function render() {
   const percent = Math.round((solvedCount / pieces.length) * 100);
   document.querySelector('#progress-number').textContent = `${String(percent).padStart(2, '0')}%`;
   document.querySelector('#progress-bar').style.transform = `scaleX(${percent / 100})`;
+  const compactNumber = document.querySelector('#progress-compact-number');
+  const compactBar = document.querySelector('#progress-compact-bar');
+  if (compactNumber) compactNumber.textContent = `${String(percent).padStart(2, '0')}%`;
+  if (compactBar) compactBar.style.transform = `scaleX(${percent / 100})`;
   document.querySelector('#move-count').textContent = String(movesMade).padStart(2, '0');
   document.querySelector('#undo-button').disabled = history.length === 0 || isAnimating;
 }
@@ -938,12 +958,25 @@ function showNotice(message) {
   noticeTimer = setTimeout(() => notice.classList.remove('is-visible'), 2600);
 }
 
+function closeComplete() {
+  const screen = document.querySelector('#complete-screen');
+  if (!screen || screen.getAttribute('aria-hidden') === 'true') return;
+  screen.setAttribute('aria-hidden', 'true');
+  completeTrapCleanup?.();
+  completeTrapCleanup = null;
+  const back = completeReturnFocus;
+  completeReturnFocus = null;
+  back?.focus?.();
+}
+
 function showComplete() {
   const screen = document.querySelector('#complete-screen');
   document.querySelector('#final-moves').textContent = movesMade;
   document.querySelector('#complete-name').textContent = levels[levelIndex].name;
+  completeReturnFocus = document.activeElement;
   screen.setAttribute('aria-hidden', 'false');
-  screen.querySelector('button').focus();
+  completeTrapCleanup = trapFocus(screen);
+  screen.querySelector('#play-again').focus();
 }
 
 function setHints(on) {
@@ -955,35 +988,56 @@ function setHints(on) {
 }
 
 function wireControls(root) {
-  root.querySelector('#undo-button').addEventListener('click', undo);
-  root.querySelector('#reset-button').addEventListener('click', reset);
-  root.querySelector('#hint-button').addEventListener('click', () => setHints(!hintsOn));
-  root.querySelector('#play-again').addEventListener('click', reset);
-  root.querySelector('#next-level').addEventListener('click', () => loadLevel(levelIndex + 1));
-  root.querySelector('#prev-button').addEventListener('click', () => loadLevel(levelIndex - 1));
-  root.querySelector('#next-button').addEventListener('click', () => loadLevel(levelIndex + 1));
+  const ac = new AbortController();
+  const { signal } = ac;
 
-  window.addEventListener('pointermove', updateDrag, { passive: false });
-  window.addEventListener('pointerup', finishDrag);
-  window.addEventListener('pointercancel', cancelDrag);
+  root.querySelector('#undo-button').addEventListener('click', undo, { signal });
+  root.querySelector('#reset-button').addEventListener('click', reset, { signal });
+  root.querySelector('#hint-button').addEventListener('click', () => setHints(!hintsOn), { signal });
+  root.querySelector('#play-again').addEventListener('click', reset, { signal });
+  root.querySelector('#next-level').addEventListener('click', () => loadLevel(levelIndex + 1), { signal });
+  root.querySelector('#prev-button').addEventListener('click', () => loadLevel(levelIndex - 1), { signal });
+  root.querySelector('#next-button').addEventListener('click', () => loadLevel(levelIndex + 1), { signal });
+
+  window.addEventListener('pointermove', updateDrag, { passive: false, signal });
+  window.addEventListener('pointerup', finishDrag, { signal });
+  window.addEventListener('pointercancel', cancelDrag, { signal });
 
   root.querySelector('#game-board').addEventListener('pointerdown', () => {
     if (isAnimating || dragState) return;
     if (selection.size) { selection.clear(); selected = null; render(); }
-  });
+  }, { signal });
 
   const rulesPanel = root.querySelector('#rules-panel');
   const rulesButton = root.querySelector('#rules-button');
+  const completeScreen = root.querySelector('#complete-screen');
   const setRules = (open) => {
-    rulesPanel.setAttribute('aria-hidden', String(!open));
-    rulesButton.setAttribute('aria-expanded', String(open));
-    if (open) rulesPanel.querySelector('.close-rules').focus();
+    if (open) {
+      rulesReturnFocus = document.activeElement;
+      rulesPanel.setAttribute('aria-hidden', 'false');
+      rulesButton.setAttribute('aria-expanded', 'true');
+      rulesTrapCleanup = trapFocus(rulesPanel);
+      rulesPanel.querySelector('.close-rules').focus();
+    } else {
+      rulesPanel.setAttribute('aria-hidden', 'true');
+      rulesButton.setAttribute('aria-expanded', 'false');
+      rulesTrapCleanup?.();
+      rulesTrapCleanup = null;
+      const back = rulesReturnFocus;
+      rulesReturnFocus = null;
+      (back ?? rulesButton).focus();
+    }
   };
-  rulesButton.addEventListener('click', () => setRules(rulesButton.getAttribute('aria-expanded') !== 'true'));
-  root.querySelector('.close-rules').addEventListener('click', () => setRules(false));
+  rulesButton.addEventListener('click', () => setRules(rulesButton.getAttribute('aria-expanded') !== 'true'), { signal });
+  root.querySelector('.close-rules').addEventListener('click', () => setRules(false), { signal });
+  root.querySelector('#mobile-rules-link')?.addEventListener('click', () => setRules(true), { signal });
 
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') setRules(false);
+    if (event.key === 'Escape') {
+      if (completeScreen.getAttribute('aria-hidden') === 'false') { closeComplete(); return; }
+      if (rulesButton.getAttribute('aria-expanded') === 'true') setRules(false);
+      return;
+    }
     if (event.key === 'h' || event.key === 'H') setHints(!hintsOn);
     if (event.key === '[') { event.preventDefault(); keyRotate(-1); }
     if (event.key === ']') { event.preventDefault(); keyRotate(1); }
@@ -994,17 +1048,33 @@ function wireControls(root) {
       selectPiece(pieces[next].id);
       root.querySelector(`[data-id="${pieces[next].id}"]`).focus();
     }
-  });
+  }, { signal });
+
+  return () => {
+    ac.abort();
+    rulesTrapCleanup?.();
+    rulesTrapCleanup = null;
+    completeTrapCleanup?.();
+    completeTrapCleanup = null;
+  };
 }
 
 const TEMPLATE = `
   <a class="skip-link" href="#board">Skip to puzzle</a>
   <main>
     <header class="masthead">
-      <div class="brand" aria-label="MA Tangram"><span class="brand-mark">間</span><span class="brand-name">MA</span></div>
+      <div class="brand" aria-label="MA Tangram"><span class="brand-mark" lang="ja">間</span><span class="brand-name">MA</span></div>
       <div class="level-nav">
         <button class="icon-button small" id="prev-button" aria-label="Previous level">‹</button>
-        <div class="level-meta"><strong id="level-name">—</strong><span id="level-count">00 / 00</span></div>
+        <div class="level-meta">
+          <strong id="level-name">—</strong>
+          <span id="level-count">00 / 00</span>
+          <div class="progress-compact" aria-label="Puzzle progress">
+            <span class="progress-compact-label">FORMING</span>
+            <strong id="progress-compact-number">00%</strong>
+            <div class="progress-track compact"><span id="progress-compact-bar"></span></div>
+          </div>
+        </div>
         <button class="icon-button small" id="next-button" aria-label="Next level">›</button>
       </div>
       <div class="masthead-right">
@@ -1026,7 +1096,7 @@ const TEMPLATE = `
       </aside>
 
       <section class="board-wrap" id="board" aria-label="Tangram puzzle board">
-        <div class="board-note" aria-hidden="true"><span>幾</span><span>何</span></div>
+        <div class="board-note" aria-hidden="true"><span lang="ja">幾</span><span lang="ja">何</span></div>
         <svg id="game-board" viewBox="0 0 760 570" role="group" aria-label="Seven non-overlapping classic tangram pieces">
           <defs>
             <filter id="paper-shadow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#342d23" flood-opacity=".16" /></filter>
@@ -1048,17 +1118,19 @@ const TEMPLATE = `
       </aside>
     </section>
 
+    <p class="mobile-hint"><button type="button" class="mobile-hint-link" id="mobile-rules-link">How it moves</button> · Slide a side · pivot a corner</p>
+
     <footer><span>Slide a side · pivot a corner · <kbd>⇧</kbd>click to group</span><span class="footer-hint"><kbd>←</kbd><kbd>→</kbd> choose · <kbd>[</kbd><kbd>]</kbd> turn · <kbd>H</kbd> silhouette</span><span>Turns snap to 45°</span></footer>
   </main>
 
-  <aside class="rules-panel" id="rules-panel" aria-hidden="true">
+  <aside class="rules-panel" id="rules-panel" role="dialog" aria-modal="true" aria-labelledby="rules-title" aria-hidden="true">
     <button class="close-rules" aria-label="Close rules">Close</button>
     <p class="eyebrow">How it moves</p>
-    <h2 class="rules-title">Three laws of contact</h2>
+    <h2 class="rules-title" id="rules-title">Three laws of contact</h2>
 
     <ol class="laws">
       <li class="law">
-        <div class="law-head"><span class="law-num">一</span><strong>Contact unlocks</strong></div>
+        <div class="law-head"><span class="law-num" lang="ja">一</span><strong>Contact unlocks</strong></div>
         <div class="law-body">
           <svg class="law-fig" viewBox="0 0 88 60" aria-hidden="true">
             <rect class="fig-solid" x="10" y="22" width="22" height="22"/>
@@ -1072,7 +1144,7 @@ const TEMPLATE = `
       </li>
 
       <li class="law">
-        <div class="law-head"><span class="law-num">二</span><strong>Sides are rails</strong></div>
+        <div class="law-head"><span class="law-num" lang="ja">二</span><strong>Sides are rails</strong></div>
         <div class="law-body">
           <svg class="law-fig" viewBox="0 0 88 60" aria-hidden="true">
             <rect class="fig-solid" x="18" y="16" width="24" height="24"/>
@@ -1086,7 +1158,7 @@ const TEMPLATE = `
       </li>
 
       <li class="law">
-        <div class="law-head"><span class="law-num">三</span><strong>Corners are pivots</strong></div>
+        <div class="law-head"><span class="law-num" lang="ja">三</span><strong>Corners are pivots</strong></div>
         <div class="law-body">
           <svg class="law-fig" viewBox="0 0 88 60" aria-hidden="true">
             <rect class="fig-solid" x="12" y="30" width="22" height="22"/>
@@ -1131,8 +1203,10 @@ const TEMPLATE = `
     <p class="rules-foot">Solved pieces settle exactly onto the silhouette. Movement guides appear only on the piece you've selected, so the board stays calm until you act.</p>
   </aside>
 
-  <div class="complete-screen" id="complete-screen" aria-hidden="true">
-    <div class="sun"></div><p class="eyebrow">Form completed</p><h2 id="complete-name">家</h2>
+  <div class="complete-screen" id="complete-screen" role="dialog" aria-modal="true" aria-labelledby="complete-heading" aria-hidden="true">
+    <div class="sun" aria-hidden="true"></div>
+    <p class="eyebrow">Form completed</p>
+    <h2 class="complete-heading" id="complete-heading" lang="ja"><span id="complete-name">家</span></h2>
     <p>Settled in <strong id="final-moves">0</strong> moves.</p>
     <div class="complete-actions"><button id="play-again" class="ghost">Replay</button><button id="next-level">Next level</button></div>
   </div>

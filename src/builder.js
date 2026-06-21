@@ -29,6 +29,12 @@ let board;
 let pieceLayer;
 let goalLayer;
 let guideLayer;
+let builderCleanup = null;
+
+export function unmountBuilder() {
+  builderCleanup?.();
+  builderCleanup = null;
+}
 
 const TRAY = {
   mountain: [110, 120, 0], shadow: [330, 120, 0], reed: [520, 110, 45],
@@ -36,6 +42,7 @@ const TRAY = {
 };
 
 export function mountBuilder(root) {
+  unmountBuilder();
   root.innerHTML = TEMPLATE;
   board = root.querySelector('#build-board');
   pieceLayer = root.querySelector('#build-pieces');
@@ -59,7 +66,7 @@ export function mountBuilder(root) {
     pieceLayer.appendChild(group);
   });
 
-  wire(root);
+  builderCleanup = wire(root);
   newLevel();
   refreshSavedLevels(root);
 }
@@ -937,30 +944,33 @@ function flash(message) {
 }
 
 function wire(root) {
-  window.addEventListener('pointermove', movePointer, { passive: false });
-  window.addEventListener('pointerup', endPointer);
-  window.addEventListener('pointercancel', cancelPointer);
-  board.addEventListener('pointerdown', () => { if (!drag) { clearSelection(); refresh(); } });
-  root.querySelector('#rotate-ccw').addEventListener('click', () => rotateGoal(-45));
-  root.querySelector('#rotate-cw').addEventListener('click', () => rotateGoal(45));
-  root.querySelector('#flip-piece').addEventListener('click', flipParallelogram);
-  root.querySelector('#editor-primary').addEventListener('click', primaryAction);
-  root.querySelector('#editor-undo').addEventListener('click', undoMove);
-  root.querySelector('#editor-new').addEventListener('click', newLevel);
-  root.querySelector('#save-level').addEventListener('click', () => saveFinalized(root));
+  const ac = new AbortController();
+  const { signal } = ac;
+  window.addEventListener('pointermove', movePointer, { passive: false, signal });
+  window.addEventListener('pointerup', endPointer, { signal });
+  window.addEventListener('pointercancel', cancelPointer, { signal });
+  board.addEventListener('pointerdown', () => { if (!drag) { clearSelection(); refresh(); } }, { signal });
+  root.querySelector('#rotate-ccw').addEventListener('click', () => rotateGoal(-45), { signal });
+  root.querySelector('#rotate-cw').addEventListener('click', () => rotateGoal(45), { signal });
+  root.querySelector('#flip-piece').addEventListener('click', flipParallelogram, { signal });
+  root.querySelector('#editor-primary').addEventListener('click', primaryAction, { signal });
+  root.querySelector('#editor-undo').addEventListener('click', undoMove, { signal });
+  root.querySelector('#editor-new').addEventListener('click', newLevel, { signal });
+  root.querySelector('#save-level').addEventListener('click', () => saveFinalized(root), { signal });
   document.addEventListener('keydown', (event) => {
     if (event.target.tagName === 'INPUT' || event.target.tagName === 'TEXTAREA') return;
     if (phase === 'goal' && event.key === '[') { event.preventDefault(); rotateGoal(-45); }
     if (phase === 'goal' && event.key === ']') { event.preventDefault(); rotateGoal(45); }
     if (phase === 'goal' && (event.key === 'f' || event.key === 'F')) flipParallelogram();
     if (phase === 'deconstruct' && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); undoMove(); }
-  });
+  }, { signal });
+  return () => ac.abort();
 }
 
 const TEMPLATE = `
   <div class="builder editor">
     <header class="build-head">
-      <div class="brand"><span class="brand-mark">間</span><span class="brand-name">MA · Editor</span></div>
+      <div class="brand"><span class="brand-mark" lang="ja">間</span><span class="brand-name">MA · Editor</span></div>
       <div class="build-status ok" id="build-status">Goal is valid</div>
       <a class="text-button" href="#">← Back to game</a>
     </header>
