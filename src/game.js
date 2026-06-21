@@ -1,4 +1,5 @@
 import { trapFocus } from './a11y.js';
+import { createModifierZone, coarsePointer } from './modifier-zone.js';
 import {
   PIECES, PIECE_BY_ID, ROT_SNAP, SNAP_VERTEX,
   sub, dot, cross, len, unit, dist, clamp, rotateVec,
@@ -49,6 +50,7 @@ let dragState = null;
 const history = [];
 
 let pieceLayer; let goalLayer; let guideLayer;
+let modifierZone = null;
 let gameCleanup = null;
 let rulesTrapCleanup = null;
 let rulesReturnFocus = null;
@@ -219,7 +221,7 @@ function selectPiece(id) { if (isAnimating) return; selectOnly(id); render(); }
 function onPiecePointerDown(event, piece, element) {
   if (isAnimating) return;
   event.stopPropagation();
-  if (event.shiftKey || event.ctrlKey || event.metaKey) {
+  if (modifierZone?.isGroupModifier(event)) {
     event.preventDefault();
     toggleSelection(piece.id);
     render();
@@ -935,7 +937,10 @@ function render() {
   if (isAnimating) dock.innerHTML = `<span class="pulse-dot"></span><span><strong>Settling</strong><small>Contact path stays clear</small></span>`;
   else if (dragState?.locked) dock.innerHTML = `<span class="locked-mark">×</span><span><strong>NO CONTACT</strong><small>This piece touches nothing to ride</small></span>`;
   else if (dragState) updateDragDock();
-  else if (selection.size >= 2) dock.innerHTML = `<span><strong>GROUP · ${selection.size} pieces</strong><small>Drag a shared edge to slide · arc a corner to pivot · shift-click to adjust</small></span>`;
+  else if (selection.size >= 2) {
+    const groupHint = coarsePointer() ? 'toggle Group to adjust' : 'shift-click to adjust';
+    dock.innerHTML = `<span><strong>GROUP · ${selection.size} pieces</strong><small>Drag a shared edge to slide · arc a corner to pivot · ${groupHint}</small></span>`;
+  }
   else if (selected) dock.innerHTML = `<span><strong>${pieceById(selected).name}</strong><small>Drag a dashed edge to slide · arc a dotted corner to pivot</small></span>`;
   else dock.innerHTML = '';
   const solvedCount = pieces.filter(pieceSolved).length;
@@ -1008,6 +1013,8 @@ function wireControls(root) {
     if (selection.size) { selection.clear(); selected = null; render(); }
   }, { signal });
 
+  modifierZone = createModifierZone(root.querySelector('.board-wrap'), { signal });
+
   const rulesPanel = root.querySelector('#rules-panel');
   const rulesButton = root.querySelector('#rules-button');
   const completeScreen = root.querySelector('#complete-screen');
@@ -1052,6 +1059,8 @@ function wireControls(root) {
 
   return () => {
     ac.abort();
+    modifierZone?.destroy();
+    modifierZone = null;
     rulesTrapCleanup?.();
     rulesTrapCleanup = null;
     completeTrapCleanup?.();
@@ -1118,7 +1127,7 @@ const TEMPLATE = `
       </aside>
     </section>
 
-    <p class="mobile-hint"><button type="button" class="mobile-hint-link" id="mobile-rules-link">How it moves</button> · Slide a side · pivot a corner</p>
+    <p class="mobile-hint"><button type="button" class="mobile-hint-link" id="mobile-rules-link">How it moves</button> · Slide a side · pivot a corner · tap <strong>Group</strong> to combine pieces</p>
 
     <footer><span>Slide a side · pivot a corner · <kbd>⇧</kbd>click to group</span><span class="footer-hint"><kbd>←</kbd><kbd>→</kbd> choose · <kbd>[</kbd><kbd>]</kbd> turn · <kbd>H</kbd> silhouette</span><span>Turns snap to 45°</span></footer>
   </main>

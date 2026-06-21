@@ -6,6 +6,7 @@ import {
 import { createContactEngine, DEFAULT_BOARD, placeAlong, placeFromPivot } from './contact-engine.js';
 import { createLevel, deleteLevel, listLevels, updateLevel } from './levels.js';
 import { getSession, login, logout } from './auth.js';
+import { createModifierZone, coarsePointer } from './modifier-zone.js';
 
 // Level authoring is intentionally reversible: compose a goal freely, then
 // deconstruct it using the same contact rules as the game. The resulting start
@@ -30,11 +31,14 @@ let board;
 let pieceLayer;
 let goalLayer;
 let guideLayer;
+let modifierZone = null;
 let builderCleanup = null;
 
 export function unmountBuilder() {
   builderCleanup?.();
   builderCleanup = null;
+  modifierZone?.destroy();
+  modifierZone = null;
 }
 
 const TRAY = {
@@ -131,7 +135,7 @@ function beginPointer(event, piece, element) {
   // group moves freely while composing the goal, but rides the contact rules
   // while deconstructing — so a connected cluster travels together and no piece
   // is stranded behind it.
-  if (event.shiftKey || event.ctrlKey || event.metaKey) { toggleSelection(piece.id); refresh(); return; }
+  if (modifierZone?.isGroupModifier(event)) { toggleSelection(piece.id); refresh(); return; }
   if (selection.size >= 2 && selection.has(piece.id)) {
     if (phase === 'goal') beginGroupFreeformDrag(event, element);
     else beginGroupContactDrag(event, element);
@@ -764,10 +768,11 @@ function updatePhaseUI() {
   const save = document.querySelector('#save-level');
   if (!saving) save.textContent = editingId ? 'Update level' : 'Save level';
   document.querySelectorAll('.editor-steps li').forEach((step) => step.toggleAttribute('aria-current', step.dataset.phase === phase));
+  const groupHint = coarsePointer() ? 'toggle Group' : 'shift-click';
   const copy = phase === 'goal'
-    ? 'Compose the finished silhouette freely — shift-click to move or rotate pieces as a group. Name it before moving on.'
+    ? `Compose the finished silhouette freely — ${groupHint} to move or rotate pieces as a group. Name it before moving on.`
     : phase === 'deconstruct'
-      ? 'Move pieces only along real contact rails and pivots — shift-click to move a connected cluster together so nothing is left stranded. Each reverse move raises the authored difficulty.'
+      ? `Move pieces only along real contact rails and pivots — ${groupHint} to move a connected cluster together so nothing is left stranded. Each reverse move raises the authored difficulty.`
       : 'The start and goal are locked. Save the level to the shared database.';
   document.querySelector('#phase-copy').textContent = copy;
 }
@@ -1002,7 +1007,12 @@ function wire(root) {
     if (phase === 'goal' && (event.key === 'f' || event.key === 'F')) flipParallelogram();
     if (phase === 'deconstruct' && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); undoMove(); }
   }, { signal });
-  return () => ac.abort();
+  modifierZone = createModifierZone(root.querySelector('.build-stage'), { signal });
+  return () => {
+    modifierZone?.destroy();
+    modifierZone = null;
+    ac.abort();
+  };
 }
 
 const LOGIN_TEMPLATE = `
