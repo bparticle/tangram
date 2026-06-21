@@ -1046,7 +1046,11 @@ const TEMPLATE = `
     <div class="build-main editor-main">
       <div class="build-stage">
         <svg id="build-board" class="build-board" viewBox="0 -90 760 570" role="group" aria-label="Tangram level editor">
-          <defs><pattern id="editor-grid" width="30" height="30" patternUnits="userSpaceOnUse"><path d="M30 0H0V30" fill="none" stroke="#e7e2d6" stroke-width="1"/></pattern></defs>
+          <defs>
+            <pattern id="editor-grid" width="30" height="30" patternUnits="userSpaceOnUse"><path d="M30 0H0V30" fill="none" stroke="#e7e2d6" stroke-width="1"/></pattern>
+            <filter id="paper-shadow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#342d23" flood-opacity=".16" /></filter>
+            <filter id="edge-glow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+          </defs>
           <rect x="0" y="-90" width="760" height="570" fill="url(#editor-grid)"/>
           <g id="build-goal" aria-hidden="true"></g>
           <g id="build-pieces"></g>
