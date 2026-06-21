@@ -5,7 +5,7 @@ import {
   pointOnSeg, segDist, normalizedAngleDelta, figureBounds, sameShape, placementFlip
 } from './shared.js';
 import { listLevels } from './levels.js';
-import { createContactEngine, placeAlong, placeFromPivot } from './contact-engine.js';
+import { createContactEngine, edgeContact, collinearOverlap, placeAlong, placeFromPivot } from './contact-engine.js';
 
 // The contact engine is unchanged: one invariant (move continuously, never
 // overlap, always stay in contact) yields slide-along-edge and pivot-around-
@@ -293,6 +293,7 @@ function beginGroupDrag(event, element) {
   members.forEach((id) => { starts[id] = [...placements[id]]; });
   const staticPolys = pieces.filter((p) => !selection.has(p.id)).map((p) => worldPoints(p, placements[p.id]));
   dragState = { pointerId: event.pointerId, element, type: 'group', mode: 'translate', members, starts, staticPolys, grab: grabPoint, delta: [0, 0], angle: 0, moved: 0 };
+  dragState.rails = groupRails(dragState);
   const pivot = groupCorners(members).sort((a, b) => dist(a, grabPoint) - dist(b, grabPoint))[0];
   if (pivot && dist(pivot, grabPoint) <= CORNER_GRAB) {
     dragState.mode = 'rotate';
@@ -302,10 +303,66 @@ function beginGroupDrag(event, element) {
     dragState.posLimit = groupRotationLimit(dragState, 1);
     if (dragState.negLimit < 0.5 && dragState.posLimit < 0.5) dragState.mode = 'translate';
   }
+  // With static neighbours, a group slides on a rail just like a single piece:
+  // wait for the drag direction, then ride the best-aligned shared edge. Only
+  // the all-selected case (nothing static) keeps the free 2D translate.
+  if (dragState.mode === 'translate' && staticPolys.length) dragState.mode = 'pending';
   render();
 }
 
+// Group sliding obeys the same law as a single piece: a member's *side* must
+// ride a static edge. A cluster touching the rest only at a corner can't be
+// dragged across it — keeping an edge flush also naturally pins the slide to
+// that edge's direction. (Group rotation, like single-piece rotation, still
+// needs only one contact point — see groupRotationValid.)
 function groupValid(delta, d) {
+  let contact = d.staticPolys.length === 0;
+  for (const id of d.members) {
+    const s = d.starts[id];
+    const poly = worldPoints(pieceById(id), [s[0] + delta[0], s[1] + delta[1], s[2], placementFlip(s)]);
+    if (!withinBounds(poly)) return false;
+    for (const sp of d.staticPolys) {
+      if (overlaps(poly, sp)) return false;
+      if (!contact && edgeContact(poly, sp)) contact = true;
+    }
+  }
+  return contact;
+}
+
+// A group slides exactly like a single piece: along a fixed rail, with the
+// extent limited by first collision / loss of contact — not by a greedy 2D
+// march. That's what lets a group ride cleanly to the far corner of a surface
+// and seat there, instead of halting a few pixels short.
+function groupRails(d) {
+  const found = [];
+  for (const id of d.members) {
+    const me = edgesOf(worldPoints(pieceById(id), d.starts[id]));
+    for (const sp of d.staticPolys) {
+      const se = edgesOf(sp);
+      for (const [a, b] of me) for (const [c, dd] of se) {
+        const segment = collinearOverlap(a, b, c, dd);
+        if (segment && dist(segment[0], segment[1]) >= 6) found.push({ dir: unit(sub(b, a)), seg: segment });
+      }
+    }
+  }
+  const byLine = new Map();
+  for (const rail of found) {
+    let angle = Math.atan2(rail.dir[1], rail.dir[0]);
+    if (angle < 0) angle += Math.PI;
+    const offset = -Math.sin(angle) * rail.seg[0][0] + Math.cos(angle) * rail.seg[0][1];
+    const key = `${Math.round(angle * 40)}:${Math.round(offset)}`;
+    const previous = byLine.get(key);
+    if (!previous || dist(rail.seg[0], rail.seg[1]) > dist(previous.seg[0], previous.seg[1])) byLine.set(key, rail);
+  }
+  return [...byLine.values()];
+}
+
+// Validity for a group sliding by `delta`: bounded, non-overlapping, and still
+// touching the static cluster. Contact here is plain touch (not edge contact),
+// so the slide can run all the way to a corner — the same asymmetry single
+// pieces have, where a rail is needed to *start* but a slide may *end* at a
+// corner. The fixed direction prevents corner-walking, so no abuse follows.
+function groupSlideValid(delta, d) {
   let contact = d.staticPolys.length === 0;
   for (const id of d.members) {
     const s = d.starts[id];
@@ -317,6 +374,54 @@ function groupValid(delta, d) {
     }
   }
   return contact;
+}
+
+function groupSlideLimit(d, dir, sign) {
+  let last = 0;
+  for (let distance = 0.6; distance <= 520; distance += 0.6) {
+    if (!groupSlideValid([sign * distance * dir[0], sign * distance * dir[1]], d)) break;
+    last = distance;
+  }
+  return last;
+}
+
+function decideGroupGesture(d, u) {
+  let best = null;
+  let bestScore = -1;
+  for (const r of d.rails) {
+    const score = Math.abs(dot(u, r.dir)) * (segDist(d.grab, r.seg[0], r.seg[1]) < 80 ? 1 : 0.001);
+    if (score > bestScore) { bestScore = score; best = r; }
+  }
+  if (!best) return;
+  d.mode = 'slide'; d.dir = best.dir; d.rail = best;
+  d.negLimit = groupSlideLimit(d, best.dir, -1);
+  d.posLimit = groupSlideLimit(d, best.dir, 1);
+  render();
+}
+
+// Click a sliding group onto a vertex alignment along its rail, so it lands on
+// the surface's end corner rather than a hair short of it.
+function snapGroupSlide(d) {
+  const dir = d.dir;
+  const s0 = dot(d.delta, dir);
+  let bestS = s0;
+  let bestDelta = SNAP_VERTEX;
+  for (const id of d.members) {
+    const verts = worldPoints(pieceById(id), d.starts[id]);
+    for (const v of verts) {
+      const cur = [v[0] + s0 * dir[0], v[1] + s0 * dir[1]];
+      for (const sp of d.staticPolys) for (const w of sp) {
+        const diff = sub(w, cur);
+        if (Math.abs(cross(dir, diff)) > SNAP_VERTEX) continue;
+        const along = dot(diff, dir);
+        if (Math.abs(along) >= bestDelta) continue;
+        const sCand = s0 + along;
+        if (sCand < -d.negLimit - 0.01 || sCand > d.posLimit + 0.01) continue;
+        if (groupSlideValid([sCand * dir[0], sCand * dir[1]], d)) { bestDelta = Math.abs(along); bestS = sCand; }
+      }
+    }
+  }
+  d.delta = [bestS * dir[0], bestS * dir[1]];
 }
 
 function marchGroup(d, desired) {
@@ -434,10 +539,20 @@ function updateDrag(event) {
   const board = clientToBoard(event);
   const point = [board.x, board.y];
   if (dragState.type === 'group') {
+    if (dragState.mode === 'pending') {
+      const drag = sub(point, dragState.grab);
+      if (len(drag) < 5) return;
+      decideGroupGesture(dragState, unit(drag));
+      if (dragState.mode === 'pending') return;
+    }
     if (dragState.mode === 'rotate') {
       const angle = Math.atan2(point[1] - dragState.pivot[1], point[0] - dragState.pivot[0]);
       dragState.angle = clamp(normalizedAngleDelta(angle - dragState.startAngle) * 180 / Math.PI, -dragState.negLimit, dragState.posLimit);
       dragState.moved = Math.abs(dragState.angle);
+    } else if (dragState.mode === 'slide') {
+      const s = clamp(dot(sub(point, dragState.grab), dragState.dir), -dragState.negLimit, dragState.posLimit);
+      dragState.delta = [s * dragState.dir[0], s * dragState.dir[1]];
+      dragState.moved = Math.abs(s);
     } else {
       dragState.delta = marchGroup(dragState, sub(point, dragState.grab));
       dragState.moved = len(dragState.delta);
@@ -528,8 +643,11 @@ async function finishDrag(event) {
       } else render();
       return;
     }
-    snapGroup(d);
-    if (len(d.delta) > 0.5 && groupValid(d.delta, d)) {
+    if (d.mode === 'pending') { render(); return; }
+    const onRail = d.mode === 'slide';
+    if (onRail) snapGroupSlide(d); else snapGroup(d);
+    const valid = onRail ? groupSlideValid(d.delta, d) : groupValid(d.delta, d);
+    if (len(d.delta) > 0.5 && valid) {
       history.push(snapshot());
       for (const id of d.members) { const s = d.starts[id]; placements[id] = [s[0] + d.delta[0], s[1] + d.delta[1], s[2], placementFlip(s)]; }
       settle(d.members);
@@ -741,6 +859,9 @@ function renderGuide() {
     if (dragState.mode === 'rotate') {
       const [cx, cy] = dragState.pivot;
       guideLayer.insertAdjacentHTML('beforeend', `<circle class="pivot-ring" cx="${cx}" cy="${cy}" r="26"/><circle class="pivot-point" cx="${cx}" cy="${cy}" r="5"/>`);
+    } else if (dragState.mode === 'slide' && dragState.rail) {
+      const [[x1, y1], [x2, y2]] = dragState.rail.seg;
+      guideLayer.insertAdjacentHTML('beforeend', `<line class="available-edge-halo is-engaged" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/><line class="available-edge is-engaged" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`);
     }
     return;
   }
@@ -762,6 +883,11 @@ function updateDragDock() {
     if (dragState.mode === 'rotate') {
       const span = Math.max(1, dragState.posLimit + dragState.negLimit);
       dock.innerHTML = `<span class="drag-meter"><i style="transform:scaleX(${Math.min(1, dragState.moved / span)})"></i></span><span><strong>ROTATE GROUP ${Math.round(dragState.moved)}°</strong><small>${dragState.members.length} pieces · snaps to 45°</small></span>`;
+    } else if (dragState.mode === 'pending') {
+      dock.innerHTML = `<span><strong>GROUP · ${dragState.members.length} pieces</strong><small>Drag along a shared edge to slide</small></span>`;
+    } else if (dragState.mode === 'slide') {
+      const span = Math.max(1, dragState.posLimit, dragState.negLimit);
+      dock.innerHTML = `<span class="drag-meter"><i style="transform:scaleX(${Math.min(1, dragState.moved / span)})"></i></span><span><strong>SLIDE GROUP ${Math.round(dragState.moved)}px</strong><small>${dragState.members.length} pieces · release to set</small></span>`;
     } else {
       dock.innerHTML = `<span class="drag-meter"><i style="transform:scaleX(${Math.min(1, dragState.moved / 140)})"></i></span><span><strong>MOVE GROUP ${Math.round(dragState.moved)}px</strong><small>${dragState.members.length} pieces · release to set</small></span>`;
     }
@@ -793,7 +919,7 @@ function render() {
   if (isAnimating) dock.innerHTML = `<span class="pulse-dot"></span><span><strong>Settling</strong><small>Contact path stays clear</small></span>`;
   else if (dragState?.locked) dock.innerHTML = `<span class="locked-mark">×</span><span><strong>NO CONTACT</strong><small>This piece touches nothing to ride</small></span>`;
   else if (dragState) updateDragDock();
-  else if (selection.size >= 2) dock.innerHTML = `<span><strong>GROUP · ${selection.size} pieces</strong><small>Drag to move · arc a contact corner to rotate · shift-click to adjust</small></span>`;
+  else if (selection.size >= 2) dock.innerHTML = `<span><strong>GROUP · ${selection.size} pieces</strong><small>Drag a shared edge to slide · arc a corner to pivot · shift-click to adjust</small></span>`;
   else if (selected) dock.innerHTML = `<span><strong>${pieceById(selected).name}</strong><small>Drag a dashed edge to slide · arc a dotted corner to pivot</small></span>`;
   else dock.innerHTML = '';
   const solvedCount = pieces.filter(pieceSolved).length;

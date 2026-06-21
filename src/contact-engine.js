@@ -48,6 +48,18 @@ export function collinearOverlap(a, b, c, d) {
   ];
 }
 
+// Does a side of polyA lie flat along an edge of polyB, overlapping for a real
+// length? This is the "side along an edge" test that makes a slide legal — used
+// for both single pieces (via contactRails) and groups, so a cluster can never
+// ride a surface on a single corner either.
+export function edgeContact(polyA, polyB, minOverlap = MIN_RAIL_OVERLAP) {
+  for (const [a, b] of edgesOf(polyA)) for (const [c, d] of edgesOf(polyB)) {
+    const segment = collinearOverlap(a, b, c, d);
+    if (segment && dist(segment[0], segment[1]) >= minOverlap) return true;
+  }
+  return false;
+}
+
 export function createContactEngine(placements, boardBounds = DEFAULT_BOARD) {
   const withinBounds = (polygon) => polygon.every(([x, y]) => (
     x >= boardBounds.minX && x <= boardBounds.maxX
