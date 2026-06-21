@@ -1,6 +1,6 @@
 import {
   PIECES, PIECE_BY_ID, ROT_SNAP, SNAP_VERTEX,
-  worldPoints, transformString, pointsString, centroid, edgesOf, overlaps,
+  worldPoints, transformString, pointsString, centroid, edgesOf, overlaps, pointOnSeg,
   sub, dot, cross, len, unit, dist, clamp, segDist, figureBounds, placementFlip
 } from './shared.js';
 import { createContactEngine, DEFAULT_BOARD, placeAlong, placeFromPivot } from './contact-engine.js';
@@ -10,7 +10,9 @@ import { createLevel, deleteLevel, listLevels, updateLevel } from './levels.js';
 // deconstruct it using the same contact rules as the game. The resulting start
 // is therefore reachable by replaying the authored path in reverse.
 
-const VERTEX_SNAP = 16;
+const VERTEX_SNAP = 28;   // px: how far a corner/edge can reach to seat onto a neighbour
+const SEAT_FINE = 1.5;    // px: corners this close are treated as the same point
+const REST_GRID = 15;     // px: resting grid used only when a piece touches nothing
 const placements = {};
 const contact = createContactEngine(placements, DEFAULT_BOARD);
 let targets = {};
@@ -250,14 +252,22 @@ function cancelPointer(event) {
   refresh();
 }
 
+// Seat a freely-dragged goal piece against its neighbours. Rotation is fixed
+// (goal pieces only turn in 45° steps), so the only freedom is translation —
+// and because the pieces are grid-congruent, one correct corner coincidence
+// seats the whole piece. So rather than snapping to the single nearest vertex
+// (which mistakes a near edge-projection for the intended corner and leaves
+// gaps), we score every reachable translation by how cleanly it tiles:
+// shared corners first, then edge contact, then least movement.
 function snapToNeighbours(id) {
   const current = placements[id];
+  const flip = placementFlip(current);
   const mine = worldPoints(PIECE_BY_ID[id], current);
-  const candidates = [];
-  const addCandidate = (offset, priority) => {
-    const distance = len(offset);
-    if (distance <= VERTEX_SNAP + 1e-6) candidates.push({ offset, distance, priority });
-  };
+  const mineEdges = edgesOf(mine);
+  const neighbours = PIECES
+    .filter((piece) => piece.id !== id)
+    .map((piece) => { const poly = worldPoints(piece, placements[piece.id]); return { poly, edges: edgesOf(poly) }; });
+
   const closestPoint = (point, a, b) => {
     const ab = sub(b, a);
     const lengthSquared = dot(ab, ab);
@@ -265,29 +275,43 @@ function snapToNeighbours(id) {
     const t = clamp(dot(sub(point, a), ab) / lengthSquared, 0, 1);
     return [a[0] + ab[0] * t, a[1] + ab[1] * t];
   };
-  const mineEdges = edgesOf(mine);
-  for (const other of PIECES) {
-    if (other.id === id) continue;
-    const otherPoints = worldPoints(other, placements[other.id]);
-    const otherEdges = edgesOf(otherPoints);
-    for (const vertex of mine) for (const neighbour of otherPoints) {
-      addCandidate(sub(neighbour, vertex), 0);
-    }
-    for (const vertex of mine) for (const [a, b] of otherEdges) {
-      addCandidate(sub(closestPoint(vertex, a, b), vertex), 1);
-    }
-    for (const neighbour of otherPoints) for (const [a, b] of mineEdges) {
-      addCandidate(sub(neighbour, closestPoint(neighbour, a, b)), 1);
-    }
+
+  // Every translation that would bring one of our features flush with a neighbour.
+  const offsets = [[0, 0]];
+  const consider = (offset) => { if (len(offset) <= VERTEX_SNAP + 1e-6) offsets.push(offset); };
+  for (const neighbour of neighbours) {
+    for (const vertex of mine) for (const point of neighbour.poly) consider(sub(point, vertex));
+    for (const vertex of mine) for (const [a, b] of neighbour.edges) consider(sub(closestPoint(vertex, a, b), vertex));
+    for (const point of neighbour.poly) for (const [a, b] of mineEdges) consider(sub(point, closestPoint(point, a, b)));
   }
-  candidates.sort((a, b) => a.distance - b.distance || a.priority - b.priority);
-  for (const candidate of candidates) {
-    const place = [current[0] + candidate.offset[0], current[1] + candidate.offset[1], current[2], placementFlip(current)];
+
+  let best = null;
+  for (const offset of offsets) {
+    const place = [current[0] + offset[0], current[1] + offset[1], current[2], flip];
     const polygon = worldPoints(PIECE_BY_ID[id], place);
-    const clear = PIECES.every((other) => other.id === id || !overlaps(polygon, worldPoints(other, placements[other.id]), 1.2));
-    if (clear) { placements[id] = place; return; }
+    if (neighbours.some((neighbour) => overlaps(polygon, neighbour.poly, 0.5))) continue;
+    const polygonEdges = edgesOf(polygon);
+    let corners = 0;
+    let contact = 0;
+    for (const neighbour of neighbours) {
+      for (const vertex of polygon) {
+        if (neighbour.poly.some((point) => dist(vertex, point) < SEAT_FINE)) corners += 1;
+        else if (neighbour.edges.some(([a, b]) => pointOnSeg(vertex, a, b))) contact += 1;
+      }
+      for (const point of neighbour.poly) {
+        if (polygonEdges.some(([a, b]) => pointOnSeg(point, a, b))) contact += 1;
+      }
+    }
+    const residual = len(offset);
+    if (!best || corners > best.corners
+        || (corners === best.corners && contact > best.contact)
+        || (corners === best.corners && contact === best.contact && residual < best.residual)) {
+      best = { corners, contact, residual, place };
+    }
   }
-  placements[id] = [Math.round(current[0] / 15) * 15, Math.round(current[1] / 15) * 15, current[2], placementFlip(current)];
+
+  if (best && (best.corners > 0 || best.contact > 0)) { placements[id] = best.place; return; }
+  placements[id] = [Math.round(current[0] / REST_GRID) * REST_GRID, Math.round(current[1] / REST_GRID) * REST_GRID, current[2], flip];
 }
 
 function placeAroundCentroid(piece, place, rotation, flip) {

@@ -14,6 +14,7 @@ import { createContactEngine, placeAlong, placeFromPivot } from './contact-engin
 
 const BOARD = { minX: -4, maxX: 764, minY: -88, maxY: 484 };
 const FIGURE_CENTER = [370, 160];
+const ASSIST_TOL = 6; // px: once a move lands a piece this close to its goal, seat it exactly
 
 const pieces = PIECES;
 const pieceById = (id) => PIECE_BY_ID[id];
@@ -487,6 +488,7 @@ async function finishDrag(event) {
         history.push(snapshot());
         const rotated = groupRotatedPlacements(d, d.angle);
         for (const id of d.members) placements[id] = rotated[id];
+        settle(d.members);
         movesMade += 1;
         render();
         if (solved()) window.setTimeout(showComplete, 420);
@@ -498,6 +500,7 @@ async function finishDrag(event) {
     if (len(d.delta) > 0.5 && groupValid(d.delta, d)) {
       history.push(snapshot());
       for (const id of d.members) { const s = d.starts[id]; placements[id] = [s[0] + d.delta[0], s[1] + d.delta[1], s[2], placementFlip(s)]; }
+      settle(d.members);
       movesMade += 1;
       render();
       if (solved()) window.setTimeout(showComplete, 420);
@@ -520,6 +523,7 @@ async function finishDrag(event) {
     document.querySelector('#action-dock').innerHTML = `<span class="pulse-dot"></span><span><strong>Settling</strong><small>Contact path stays clear</small></span>`;
     await animateToTransform(d.element, d.current, target, 170);
     placements[d.piece.id] = target;
+    settle([d.piece.id]);
     movesMade += 1;
     selected = d.piece.id;
     isAnimating = false;
@@ -568,6 +572,7 @@ function keyRotate(sign) {
   if (!lawful(selected, candidate, hood)) { showNotice('That turn is blocked.'); return; }
   history.push(snapshot());
   placements[selected] = candidate;
+  settle([selected]);
   movesMade += 1;
   render();
   if (solved()) window.setTimeout(showComplete, 420);
@@ -587,6 +592,7 @@ function keyRotateGroup(sign) {
     history.push(snapshot());
     const rotated = groupRotatedPlacements(state, angle);
     for (const id of members) placements[id] = rotated[id];
+    settle(members);
     movesMade += 1;
     render();
     if (solved()) window.setTimeout(showComplete, 420);
@@ -599,6 +605,26 @@ function keyRotateGroup(sign) {
 // --- win / state -----------------------------------------------------------
 const pieceSolved = (piece) => sameShape(worldPoints(piece, placements[piece.id]), worldPoints(piece, targets[piece.id]));
 const solved = () => pieces.every(pieceSolved);
+
+// Once a committed move leaves a piece essentially on its own goal, finish the
+// alignment exactly. Authored targets — especially intentionally off-kilter
+// ones — can sit a hair off the contact lattice the player can actually reach;
+// without this they'd be visibly "there" yet never register, and the solved
+// figure would keep hairline gaps. We only seat when the exact goal is clear of
+// every neighbour, so it can never force an overlap or reveal a hidden answer
+// (it triggers only when the player is already correct).
+function settle(ids) {
+  for (const id of ids) {
+    const target = targets[id];
+    if (!target) continue;
+    const piece = pieceById(id);
+    const goal = worldPoints(piece, target);
+    if (!sameShape(worldPoints(piece, placements[id]), goal, ASSIST_TOL)) continue;
+    if (!withinBounds(goal)) continue;
+    if (neighbourhood(id).some((other) => overlaps(goal, other))) continue;
+    placements[id] = [...target];
+  }
+}
 
 function snapshot() {
   const map = {};
