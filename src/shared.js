@@ -31,13 +31,22 @@ export const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 export const rotateVec = (v, a) => { const c = Math.cos(a); const s = Math.sin(a); return [v[0] * c - v[1] * s, v[0] * s + v[1] * c]; };
 
 export const pointsString = (points) => points.map(([x, y]) => `${x},${y}`).join(' ');
-export const transformString = ([x, y, rotation]) => `translate(${x} ${y}) rotate(${rotation})`;
+export const placementFlip = (value) => value?.[3] === -1 ? -1 : 1;
+export const transformString = (value) => {
+  const [x, y, rotation] = value;
+  const flip = placementFlip(value);
+  return `translate(${x} ${y}) rotate(${rotation})${flip === -1 ? ' scale(-1 1)' : ''}`;
+};
 
 export function worldPoints(piece, value) {
   const radians = value[2] * Math.PI / 180;
   const c = Math.cos(radians);
   const s = Math.sin(radians);
-  return piece.shape.map(([x, y]) => [value[0] + x * c - y * s, value[1] + x * s + y * c]);
+  const flip = placementFlip(value);
+  return piece.shape.map(([x, y]) => {
+    const fx = x * flip;
+    return [value[0] + fx * c - y * s, value[1] + fx * s + y * c];
+  });
 }
 
 export function centroid(points) {

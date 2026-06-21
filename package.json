@@ -4,9 +4,15 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node server/index.js --dev",
     "build": "vite build",
-    "preview": "vite preview"
+    "start": "node server/index.js",
+    "db:setup": "node server/setup.js"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
   },
   "devDependencies": {
     "vite": "^7.0.0"
