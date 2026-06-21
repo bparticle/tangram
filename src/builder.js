@@ -32,6 +32,13 @@ let pieceLayer;
 let goalLayer;
 let guideLayer;
 let modifierZone = null;
+let snapToggle = null;
+// Goal-phase preference: when on (default), a freely-dropped piece seats its
+// corners onto neighbours. When off, the author can translate to arbitrary
+// positions. Only governs translation — rotation always stays in 45° steps,
+// and the deconstruct/game contact snapping is untouched so reverse moves stay
+// reproducible in the game. Persists across levels as a tool setting.
+let snapEnabled = true;
 let builderCleanup = null;
 
 export function unmountBuilder() {
@@ -39,6 +46,8 @@ export function unmountBuilder() {
   builderCleanup = null;
   modifierZone?.destroy();
   modifierZone = null;
+  snapToggle?.destroy();
+  snapToggle = null;
 }
 
 const TRAY = {
@@ -449,6 +458,7 @@ function outsideNeighbours(memberSet) {
 }
 
 function snapToNeighbours(id) {
+  if (!snapEnabled) return;
   const current = placements[id];
   const flip = placementFlip(current);
   const offset = bestSeatingOffset([worldPoints(PIECE_BY_ID[id], current)], outsideNeighbours(new Set([id])));
@@ -461,6 +471,7 @@ function snapToNeighbours(id) {
 // No grid fallback — that would shear the group apart; a freely-placed group
 // just stays where it was dropped.
 function snapGroupToNeighbours(members) {
+  if (!snapEnabled) return;
   const memberSet = new Set(members);
   const movingPolys = members.map((id) => worldPoints(PIECE_BY_ID[id], placements[id]));
   const offset = bestSeatingOffset(movingPolys, outsideNeighbours(memberSet));
@@ -759,6 +770,7 @@ function updatePhaseUI() {
   const controls = document.querySelector('#goal-controls');
   input.disabled = phase !== 'goal';
   controls.hidden = phase !== 'goal';
+  snapToggle?.setVisible(phase === 'goal');
   primary.hidden = phase === 'final';
   primary.textContent = phase === 'goal' ? 'Begin deconstruction' : 'Finalize level';
   undo.hidden = phase !== 'deconstruct';
@@ -981,6 +993,36 @@ function flash(message) {
   flashTimer = setTimeout(() => element.classList.remove('show'), 2400);
 }
 
+// A Snap toggle that sits beside the Group toggle. On by default; turning it off
+// lets freeform drops (and post-rotate/flip reseats) land at arbitrary positions
+// instead of seating corners onto neighbours. Only meaningful while composing the
+// goal, so it hides itself once deconstruction begins.
+function createSnapToggle(container, signal) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'snap-zone';
+  button.innerHTML = '<span class="snap-zone-key" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 4v7a6 6 0 0 0 12 0V4h-3.5v7a2.5 2.5 0 0 1-5 0V4z"/></svg></span><span class="snap-zone-label">Snap</span>';
+  const apply = () => {
+    button.classList.toggle('is-off', !snapEnabled);
+    button.setAttribute('aria-pressed', String(snapEnabled));
+    button.setAttribute('aria-label', snapEnabled
+      ? 'Snapping on — dropped pieces seat corners onto neighbours. Tap to translate freely.'
+      : 'Snapping off — dropped pieces stay where placed. Tap to seat corners onto neighbours.');
+  };
+  button.addEventListener('click', () => {
+    snapEnabled = !snapEnabled;
+    apply();
+    navigator.vibrate?.(6);
+    showNotice(snapEnabled ? 'Snapping on — corners seat onto neighbours.' : 'Snapping off — pieces translate freely.');
+  }, { signal });
+  apply();
+  container.appendChild(button);
+  return {
+    setVisible(on) { button.hidden = !on; },
+    destroy() { button.remove(); }
+  };
+}
+
 function wire(root) {
   const ac = new AbortController();
   const { signal } = ac;
@@ -1006,9 +1048,12 @@ function wire(root) {
     if (phase === 'deconstruct' && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); undoMove(); }
   }, { signal });
   modifierZone = createModifierZone(root.querySelector('.build-stage'), { signal });
+  snapToggle = createSnapToggle(root.querySelector('.build-stage'), signal);
   return () => {
     modifierZone?.destroy();
     modifierZone = null;
+    snapToggle?.destroy();
+    snapToggle = null;
     ac.abort();
   };
 }

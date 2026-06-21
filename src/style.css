@@ -154,6 +154,39 @@ h1 em { color: var(--vermilion); font-style: normal; }
 .modifier-zone-label { font-size: .48rem; letter-spacing: .14em; text-transform: uppercase; }
 .board-wrap.group-modifier-on,
 .build-stage.group-modifier-on { outline: 2px solid oklch(52% 0.14 35 / 0.45); outline-offset: -2px; }
+
+/* Snap toggle — sits at the build stage's bottom-left, beside the Group toggle
+   on coarse pointers. Calm by default (snap on); the off state is the one worth
+   flagging, so it reads as dashed + struck. */
+.snap-zone {
+  position: absolute;
+  z-index: 6;
+  left: max(10px, env(safe-area-inset-left));
+  bottom: max(10px, env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 52px;
+  min-height: 52px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--paper-veil);
+  color: var(--ink);
+  box-shadow: 0 4px 14px var(--shadow-ink);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background 180ms ease, border-color 180ms ease, color 180ms ease, box-shadow 180ms ease;
+}
+.snap-zone[hidden] { display: none; }
+.snap-zone.is-off { background: transparent; border-style: dashed; color: var(--muted); box-shadow: none; }
+.snap-zone.is-off .snap-zone-label { text-decoration: line-through; }
+.snap-zone-key { display: grid; place-items: center; }
+.snap-zone-key svg { width: 18px; height: 18px; fill: currentColor; }
+.snap-zone.is-off .snap-zone-key svg { fill: none; stroke: currentColor; stroke-width: 1.6; }
+.snap-zone-label { font-size: .48rem; letter-spacing: .14em; text-transform: uppercase; }
 .notice.is-visible { opacity: 1; transform: translate(-50%, 0); }
 
 .side-tools { align-self: center; justify-self: end; display: flex; flex-direction: column; align-items: center; gap: 14px; }
@@ -251,6 +284,8 @@ kbd { min-width: 20px; height: 20px; display: inline-grid; place-items: center; 
 
 @media (pointer: coarse), (max-width: 640px) {
   .modifier-zone { display: flex; }
+  /* Group toggle reappears at the corner — slide Snap to its right. */
+  .snap-zone { left: calc(max(10px, env(safe-area-inset-left)) + 60px); }
 }
 
 @media (pointer: coarse) {
