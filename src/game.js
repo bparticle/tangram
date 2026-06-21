@@ -363,6 +363,36 @@ function groupRails(d) {
       }
     }
   }
+  // Corner-trap fallback: mirror the single-piece logic — if no normal rail
+  // exists the group may have slid to the far end of a shared edge. Find
+  // collinear edge pairs with near-zero overlap so the group can slide back.
+  if (found.length === 0) {
+    for (const id of d.members) {
+      const me = edgesOf(worldPoints(pieceById(id), d.starts[id]));
+      for (const sp of d.staticPolys) {
+        const se = edgesOf(sp);
+        for (const [a, b] of me) {
+          const ab = sub(b, a);
+          const l = len(ab);
+          if (l < 1e-6) continue;
+          const dir = [ab[0] / l, ab[1] / l];
+          for (const [c, dd] of se) {
+            const cd = sub(dd, c);
+            const lcd = len(cd);
+            if (lcd < 1e-6) continue;
+            if (Math.abs(cross(dir, [cd[0] / lcd, cd[1] / lcd])) > 0.03) continue;
+            if (Math.abs(cross(dir, sub(c, a))) > 0.8) continue;
+            const tc = dot(sub(c, a), dir);
+            const td = dot(sub(dd, a), dir);
+            const overlapLow = Math.max(0, Math.min(tc, td));
+            const overlapHigh = Math.min(l, Math.max(tc, td));
+            const overlap = overlapHigh - overlapLow;
+            if (overlap > -0.8 && overlap < 6) found.push({ dir, seg: [a, b] });
+          }
+        }
+      }
+    }
+  }
   const byLine = new Map();
   for (const rail of found) {
     let angle = Math.atan2(rail.dir[1], rail.dir[0]);
