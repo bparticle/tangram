@@ -283,6 +283,7 @@ kbd { min-width: 20px; height: 20px; display: inline-grid; place-items: center; 
 .goal-thumb svg { width: 100%; height: 100%; }
 .goal-thumb svg polygon, .build-preview svg polygon { fill: var(--ink); stroke: none; }
 .goal-thumb .hint-division { fill: var(--ink); stroke: oklch(96.5% 0.012 95 / 0.82); stroke-width: 1.2; vector-effect: non-scaling-stroke; }
+.goal-thumb .assignment-piece { stroke: var(--ink); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .goal-hint { position: absolute; right: 6px; bottom: 6px; width: 44px; height: 44px; background: oklch(96.5% 0.012 95 / 0.88); }
 .goal-hint svg { width: 15px; }
 .lede { margin-top: 20px; }

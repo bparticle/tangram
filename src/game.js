@@ -867,11 +867,13 @@ function renderAssignment() {
   const pad = 16;
   const vb = `${b.minX - pad} ${b.minY - pad} ${b.w + 2 * pad} ${b.h + 2 * pad}`;
   const polygons = pieces.map((p) => ({ points: pointsString(worldPoints(p, targets[p.id])) }));
-  // Paint the prompt once through a union clip by default. The hint reveals
-  // only its construction lines; piece colours remain undisclosed.
+  // Without hint: solid dark polygons with a matching 1px stroke per piece.
+  // The stroke seals sub-pixel seams Safari shows at clipPath boundaries on
+  // high-DPI displays — a clipPath approach was used before and showed faint
+  // division lines on iPad retina. With hint: light stroke reveals divisions.
   const artwork = hintsOn
     ? polygons.map(({ points }) => `<polygon class="hint-division" points="${points}"/>`).join('')
-    : `<defs><clipPath id="assignment-silhouette" clipPathUnits="userSpaceOnUse">${polygons.map(({ points }) => `<polygon points="${points}"/>`).join('')}</clipPath></defs><rect x="${b.minX - pad}" y="${b.minY - pad}" width="${b.w + 2 * pad}" height="${b.h + 2 * pad}" fill="#33352c" clip-path="url(#assignment-silhouette)"/>`;
+    : polygons.map(({ points }) => `<polygon class="assignment-piece" points="${points}"/>`).join('');
   document.querySelector('#goal-thumb').innerHTML = `<svg viewBox="${vb}" preserveAspectRatio="xMidYMid meet">${artwork}</svg>`;
   document.querySelector('#assignment-name').textContent = levels[levelIndex].name;
   // Surface the difficulty the editor records but the game otherwise hides.
