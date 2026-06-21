@@ -565,7 +565,10 @@ function updateDrag(event) {
     }
     if (dragState.mode === 'rotate') {
       const angle = Math.atan2(point[1] - dragState.pivot[1], point[0] - dragState.pivot[0]);
-      dragState.angle = clamp(normalizedAngleDelta(angle - dragState.startAngle) * 180 / Math.PI, -dragState.negLimit, dragState.posLimit);
+      const raw = clamp(normalizedAngleDelta(angle - dragState.startAngle) * 180 / Math.PI, -dragState.negLimit, dragState.posLimit);
+      const snapped = Math.round(raw / ROT_SNAP) * ROT_SNAP;
+      const inRange = snapped >= -dragState.negLimit - 0.01 && snapped <= dragState.posLimit + 0.01;
+      dragState.angle = inRange && Math.abs(raw - snapped) <= ROT_MAGNET ? snapped : raw;
       dragState.moved = Math.abs(dragState.angle);
     } else if (dragState.mode === 'slide') {
       const s = clamp(dot(sub(point, dragState.grab), dragState.dir), -dragState.negLimit, dragState.posLimit);

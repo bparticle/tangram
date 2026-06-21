@@ -91,12 +91,46 @@ export function createContactEngine(placements, boardBounds = DEFAULT_BOARD) {
       const otherEdges = edgesOf(otherPolygon);
       // Only edge-on-edge contact yields a rail: one of this piece's sides must
       // lie collinear with — and overlap, for a real length — one of the other's
-      // edges. Vertex-on-edge contact (a corner riding an edge on a single point)
-      // is deliberately *not* a rail, so a piece can never slide on a corner.
+      // edges. A bare vertex-on-mid-edge contact is not a rail.
       for (const [a, b] of pieceEdges) for (const [c, d] of otherEdges) {
         const segment = collinearOverlap(a, b, c, d);
         if (segment && dist(segment[0], segment[1]) >= MIN_RAIL_OVERLAP) {
           found.push({ dir: unit(sub(b, a)), seg: segment });
+        }
+      }
+    }
+    // Corner-trap fallback: if no normal rail exists the piece may have slid to
+    // the very end of a shared edge (overlap shrank to zero). Find collinear edge
+    // pairs whose overlap is in the range (-0.8, MIN_RAIL_OVERLAP) — meaning the
+    // edges are on the same line and just barely touching at their endpoints.
+    // This lets the piece slide back along the shared edge direction. The
+    // collinearity test ensures the direction is the one that was shared, so the
+    // piece cannot cross onto a different surface through the corner.
+    if (found.length === 0) {
+      for (const other of PIECES) {
+        if (other.id === id) continue;
+        const otherPolygon = worldPoints(other, placements[other.id]);
+        const otherEdges = edgesOf(otherPolygon);
+        for (const [a, b] of pieceEdges) {
+          const ab = sub(b, a);
+          const l = len(ab);
+          if (l < 1e-6) continue;
+          const dir = [ab[0] / l, ab[1] / l];
+          for (const [c, d] of otherEdges) {
+            const cd = sub(d, c);
+            const lcd = len(cd);
+            if (lcd < 1e-6) continue;
+            if (Math.abs(cross(dir, [cd[0] / lcd, cd[1] / lcd])) > 0.03) continue;
+            if (Math.abs(cross(dir, sub(c, a))) > 0.8) continue;
+            const tc = dot(sub(c, a), dir);
+            const td = dot(sub(d, a), dir);
+            const overlapLow = Math.max(0, Math.min(tc, td));
+            const overlapHigh = Math.min(l, Math.max(tc, td));
+            const overlap = overlapHigh - overlapLow;
+            if (overlap > -0.8 && overlap < MIN_RAIL_OVERLAP) {
+              found.push({ dir, seg: [a, b] });
+            }
+          }
         }
       }
     }
