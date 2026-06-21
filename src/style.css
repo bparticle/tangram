@@ -324,3 +324,29 @@ button.ghost:hover { border-color: var(--vermilion); color: var(--vermilion); }
   .level-meta { min-width: 90px; }
   .masthead-right { gap: 12px; }
 }
+
+/* Editor authentication */
+.build-head-actions { display: flex; align-items: center; gap: 18px; justify-self: end; }
+
+.editor-login { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 32px; }
+.login-card {
+  display: flex; flex-direction: column; gap: 18px; width: min(380px, 100%);
+  padding: 38px 34px; background: var(--paper-card); border: 1px solid var(--line);
+  border-radius: 4px; box-shadow: 0 24px 60px -32px var(--shadow-ink);
+}
+.login-card .brand { justify-content: flex-start; }
+.login-copy { margin: 0; color: var(--muted); line-height: 1.5; }
+.login-card .field { display: flex; flex-direction: column; gap: 7px; }
+.login-card .field span { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-subtle); }
+.login-card input {
+  font: inherit; padding: 11px 13px; border: 1px solid var(--line); border-radius: 3px;
+  background: oklch(99% 0.008 95 / 0.6); color: var(--ink);
+}
+.login-card input:focus-visible { outline: 2px solid var(--vermilion); outline-offset: 1px; }
+.login-error { margin: 0; min-height: 1.2em; color: var(--vermilion); font-size: 14px; }
+.login-card button[type="submit"] {
+  padding: 12px 16px; border: none; border-radius: 3px; cursor: pointer;
+  background: var(--vermilion); color: var(--paper); letter-spacing: 0.04em;
+}
+.login-card button[type="submit"]:disabled { opacity: 0.6; cursor: default; }
+.login-card .text-button { align-self: center; }

@@ -5,6 +5,7 @@ import {
 } from './shared.js';
 import { createContactEngine, DEFAULT_BOARD, placeAlong, placeFromPivot } from './contact-engine.js';
 import { createLevel, deleteLevel, listLevels, updateLevel } from './levels.js';
+import { getSession, login, logout } from './auth.js';
 
 // Level authoring is intentionally reversible: compose a goal freely, then
 // deconstruct it using the same contact rules as the game. The resulting start
@@ -41,8 +42,42 @@ const TRAY = {
   stone: [110, 330, 0], bridge: [250, 330, 0], wing: [430, 330, 0], beak: [560, 330, 0]
 };
 
-export function mountBuilder(root) {
+// The editor is for the single author only. Reads are public, so the game plays
+// for everyone, but composing levels requires a session. Gate the route behind a
+// login screen and only build the editor once authenticated.
+export async function mountBuilder(root) {
   unmountBuilder();
+  let session;
+  try { session = await getSession(); } catch { session = { authenticated: false }; }
+  if (session.authenticated) buildEditor(root);
+  else mountLogin(root);
+}
+
+function mountLogin(root) {
+  root.innerHTML = LOGIN_TEMPLATE;
+  const form = root.querySelector('#login-form');
+  const input = root.querySelector('#login-password');
+  const error = root.querySelector('#login-error');
+  const ac = new AbortController();
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    error.textContent = '';
+    const button = form.querySelector('button');
+    button.disabled = true;
+    try {
+      await login(input.value);
+      buildEditor(root);
+    } catch (err) {
+      error.textContent = err.message;
+      button.disabled = false;
+      input.select();
+    }
+  }, { signal: ac.signal });
+  input.focus();
+  builderCleanup = () => ac.abort();
+}
+
+function buildEditor(root) {
   root.innerHTML = TEMPLATE;
   board = root.querySelector('#build-board');
   pieceLayer = root.querySelector('#build-pieces');
@@ -957,6 +992,9 @@ function wire(root) {
   root.querySelector('#editor-undo').addEventListener('click', undoMove, { signal });
   root.querySelector('#editor-new').addEventListener('click', newLevel, { signal });
   root.querySelector('#save-level').addEventListener('click', () => saveFinalized(root), { signal });
+  root.querySelector('#editor-logout').addEventListener('click', async () => {
+    try { await logout(); } finally { unmountBuilder(); mountLogin(root); }
+  }, { signal });
   document.addEventListener('keydown', (event) => {
     if (event.target.tagName === 'INPUT' || event.target.tagName === 'TEXTAREA') return;
     if (phase === 'goal' && event.key === '[') { event.preventDefault(); rotateGoal(-45); }
@@ -967,12 +1005,28 @@ function wire(root) {
   return () => ac.abort();
 }
 
+const LOGIN_TEMPLATE = `
+  <div class="editor-login">
+    <form id="login-form" class="login-card" novalidate>
+      <div class="brand"><span class="brand-mark" lang="ja">間</span><span class="brand-name">MA · Editor</span></div>
+      <p class="login-copy">This area is for the level author. Enter the password to continue.</p>
+      <label class="field"><span>Password</span><input id="login-password" type="password" autocomplete="current-password" autofocus/></label>
+      <p id="login-error" class="login-error" role="alert"></p>
+      <button type="submit">Enter editor</button>
+      <a class="text-button" href="#">← Back to game</a>
+    </form>
+  </div>
+`;
+
 const TEMPLATE = `
   <div class="builder editor">
     <header class="build-head">
       <div class="brand"><span class="brand-mark" lang="ja">間</span><span class="brand-name">MA · Editor</span></div>
       <div class="build-status ok" id="build-status">Goal is valid</div>
-      <a class="text-button" href="#">← Back to game</a>
+      <div class="build-head-actions">
+        <button type="button" class="text-button" id="editor-logout">Log out</button>
+        <a class="text-button" href="#">← Back to game</a>
+      </div>
     </header>
     <ol class="editor-steps" aria-label="Level creation progress">
       <li data-phase="goal" aria-current="true"><span>01</span><strong>Compose goal</strong></li>

@@ -2,6 +2,7 @@ const LEGACY_KEY = 'ma_tangram_custom_levels_v1';
 
 async function request(path, options) {
   const response = await fetch(path, {
+    credentials: 'same-origin',
     ...options,
     headers: options?.body ? { 'content-type': 'application/json', ...options.headers } : options?.headers
   });

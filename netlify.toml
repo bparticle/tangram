@@ -1,0 +1,20 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+# API calls hit the Express-backed function.
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+  force = true
+
+# Single-page app: serve index.html for any non-asset route.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
