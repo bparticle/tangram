@@ -660,7 +660,7 @@ function updateDrag(event) {
   if (dragState.type === 'group') {
     if (dragState.mode === 'pending') {
       decideGroupGesture(dragState, point);
-      if (dragState.mode === 'pending') { renderGuide(); updateDragDock(); return; }
+      if (dragState.mode === 'pending') { renderGuide(); return; }
     }
     if (dragState.mode === 'rotate') {
       const angle = Math.atan2(point[1] - dragState.pivot[1], point[0] - dragState.pivot[0]);
@@ -680,12 +680,11 @@ function updateDrag(event) {
       dragState.moved = len(dragState.delta);
     }
     applyGroupTransforms(dragState);
-    updateDragDock();
     return;
   }
   if (dragState.mode === 'pending') {
     decideGesture(dragState, point);
-    if (dragState.mode === 'pending') { renderGuide(); updateDragDock(); return; }
+    if (dragState.mode === 'pending') { renderGuide(); return; }
   }
   if (dragState.mode === 'slide') {
     const s = clamp(dot(sub(point, dragState.grab), dragState.dir), -dragState.negLimit, dragState.posLimit);
@@ -702,7 +701,6 @@ function updateDrag(event) {
     dragState.current = placeFromPivot(dragState.pivot, dragState.lp, dragState.start[2] + deg, dragState.flip);
   }
   dragState.element.setAttribute('transform', transformString(dragState.current));
-  updateDragDock();
 }
 
 // Pull a live rotation toward the nearest reachable 45° stop while dragging, so
@@ -777,6 +775,7 @@ async function finishDrag(event) {
       movesMade += 1;
       render();
       if (solved()) window.setTimeout(showComplete, 420);
+      else showNotice(`Moved ${d.members.length} pieces together.`);
     } else render();
     return;
   }
@@ -792,7 +791,6 @@ async function finishDrag(event) {
   if (changed && lawful(d.piece.id, target, d.hood)) {
     history.push(snapshot());
     isAnimating = true;
-    document.querySelector('#action-dock').innerHTML = `<span class="pulse-dot"></span><span><strong>Settling</strong><small>Contact path stays clear</small></span>`;
     await animateToTransform(d.element, d.current, target, 170);
     placements[d.piece.id] = target;
     settle([d.piece.id]);
@@ -801,6 +799,7 @@ async function finishDrag(event) {
     isAnimating = false;
     render();
     if (solved()) window.setTimeout(showComplete, 420);
+    else showNotice(d.mode === 'rotate' ? 'Pivoted on a shared corner.' : 'Slid along the contact edge.');
   } else {
     d.element.setAttribute('transform', transformString(before));
     selected = d.piece.id;
@@ -833,20 +832,21 @@ function keyRotate(sign) {
   if (!selected || isAnimating) return;
   if (selection.size > 1) { keyRotateGroup(sign); return; }
   const corners = contactCorners(selected);
-  if (!corners.length) return;
+  if (!corners.length) { showNotice('No shared corner to pivot on.'); return; }
   const hood = neighbourhood(selected);
   const pivot = corners[0];
   const lp = localPivot(selected, pivot);
   const start = placements[selected];
   const target = (Math.round(start[2] / ROT_SNAP) + sign) * ROT_SNAP;
   const candidate = placeFromPivot(pivot, lp, target, placementFlip(start));
-  if (!lawful(selected, candidate, hood)) return;
+  if (!lawful(selected, candidate, hood)) { showNotice('That turn is blocked.'); return; }
   history.push(snapshot());
   placements[selected] = candidate;
   settle([selected]);
   movesMade += 1;
   render();
   if (solved()) window.setTimeout(showComplete, 420);
+  else showNotice('Pivoted on a shared corner.');
 }
 
 function keyRotateGroup(sign) {
@@ -866,8 +866,10 @@ function keyRotateGroup(sign) {
     movesMade += 1;
     render();
     if (solved()) window.setTimeout(showComplete, 420);
+    else showNotice(`Pivoted ${members.length} pieces together.`);
     return;
   }
+  showNotice('That group turn is blocked.');
 }
 
 // --- win / state -----------------------------------------------------------
@@ -906,6 +908,7 @@ function undo() {
   pieces.forEach((p) => { placements[p.id] = [...prev[p.id]]; });
   movesMade = Math.max(0, movesMade - 1);
   render();
+  showNotice('One move reversed.');
 }
 
 function reset() {
@@ -918,6 +921,7 @@ function reset() {
   dragState = null;
   closeComplete();
   render();
+  showNotice('Scramble restored.');
 }
 
 // --- rendering -------------------------------------------------------------
@@ -1016,32 +1020,6 @@ function renderGuide() {
   }
 }
 
-function updateDragDock() {
-  const dock = document.querySelector('#action-dock');
-  if (!dragState || dragState.locked) return;
-  if (dragState.type === 'group') {
-    if (dragState.mode === 'rotate') {
-      const span = Math.max(1, dragState.posLimit + dragState.negLimit);
-      dock.innerHTML = `<span class="drag-meter"><i style="transform:scaleX(${Math.min(1, dragState.moved / span)})"></i></span><span><strong>ROTATE GROUP ${Math.round(dragState.moved)}°</strong><small>${dragState.members.length} pieces · snaps to 45°</small></span>`;
-    } else if (dragState.mode === 'pending') {
-      dock.innerHTML = `<span><strong>GROUP · ${dragState.members.length} pieces</strong><small>Drag along a shared edge to slide</small></span>`;
-    } else if (dragState.mode === 'slide') {
-      const span = Math.max(1, dragState.posLimit, dragState.negLimit);
-      dock.innerHTML = `<span class="drag-meter"><i style="transform:scaleX(${Math.min(1, dragState.moved / span)})"></i></span><span><strong>SLIDE GROUP ${Math.round(dragState.moved)}px</strong><small>${dragState.members.length} pieces · release to set</small></span>`;
-    } else {
-      dock.innerHTML = `<span class="drag-meter"><i style="transform:scaleX(${Math.min(1, dragState.moved / 140)})"></i></span><span><strong>MOVE GROUP ${Math.round(dragState.moved)}px</strong><small>${dragState.members.length} pieces · release to set</small></span>`;
-    }
-  } else if (dragState.mode === 'pending') {
-    dock.innerHTML = `<span><strong>${pieceById(dragState.piece.id).name}</strong><small>Drag a face to slide · arc a corner to rotate</small></span>`;
-  } else if (dragState.mode === 'slide') {
-    const span = Math.max(1, dragState.posLimit, dragState.negLimit);
-    dock.innerHTML = `<span class="drag-meter"><i style="transform:scaleX(${Math.min(1, dragState.moved / span)})"></i></span><span><strong>SLIDE ${Math.round(dragState.moved)}px</strong><small>Release to set</small></span>`;
-  } else {
-    const span = Math.max(1, dragState.posLimit + dragState.negLimit);
-    dock.innerHTML = `<span class="drag-meter"><i style="transform:scaleX(${Math.min(1, dragState.moved / span)})"></i></span><span><strong>ROTATE ${Math.round(dragState.moved)}°</strong><small>Snaps to 45°</small></span>`;
-  }
-}
-
 function render() {
   const driven = dragState?.locked ? null
     : dragState?.type === 'group' ? new Set(dragState.members)
@@ -1055,16 +1033,6 @@ function render() {
   });
   selection.forEach((id) => { const front = pieceLayer.querySelector(`[data-id="${id}"]`); if (front) pieceLayer.appendChild(front); });
   renderGuide();
-  const dock = document.querySelector('#action-dock');
-  if (isAnimating) dock.innerHTML = `<span class="pulse-dot"></span><span><strong>Settling</strong><small>Contact path stays clear</small></span>`;
-  else if (dragState?.locked) dock.innerHTML = `<span class="locked-mark">×</span><span><strong>NO CONTACT</strong><small>This piece touches nothing to ride</small></span>`;
-  else if (dragState) updateDragDock();
-  else if (selection.size >= 2) {
-    const groupHint = coarsePointer() ? 'toggle Group to adjust' : 'shift-click to adjust';
-    dock.innerHTML = `<span><strong>GROUP · ${selection.size} pieces</strong><small>Drag a shared edge to slide · arc a corner to pivot · ${groupHint}</small></span>`;
-  }
-  else if (selected) dock.innerHTML = `<span><strong>${pieceById(selected).name}</strong><small>Drag a dashed edge to slide · arc a dotted corner to pivot</small></span>`;
-  else dock.innerHTML = '';
   const solvedCount = pieces.filter(pieceSolved).length;
   const percent = Math.round((solvedCount / pieces.length) * 100);
   document.querySelector('#progress-number').textContent = `${String(percent).padStart(2, '0')}%`;
@@ -1077,6 +1045,13 @@ function render() {
   document.querySelector('#undo-button').disabled = history.length === 0 || isAnimating;
 }
 
+function showNotice(message) {
+  const notice = document.querySelector('#notice');
+  clearTimeout(noticeTimer);
+  notice.textContent = message;
+  notice.classList.add('is-visible');
+  noticeTimer = setTimeout(() => notice.classList.remove('is-visible'), 2600);
+}
 
 function closeComplete() {
   const screen = document.querySelector('#complete-screen');
@@ -1212,7 +1187,7 @@ const TEMPLATE = `
         <p class="eyebrow" id="assignment-eyebrow">Assignment</p>
         <h1 id="assignment-name">—</h1>
         <div class="goal-card"><div id="goal-thumb" class="goal-thumb" aria-label="Target silhouette"></div><button class="icon-button goal-hint" id="hint-button" aria-label="Toggle silhouette divisions" aria-pressed="false" title="Show silhouette divisions (H)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 1 4 10.5c-.7.7-1 1.2-1 2.5H9c0-1.3-.3-1.8-1-2.5A6 6 0 0 1 12 3z"/></svg></button></div>
-        <p class="lede">Form the silhouette. A piece slides only where one of its sides rests along another's edge; arc a shared corner to pivot. Nothing overlaps.</p>
+        <p class="lede">Form the silhouette. A piece slides along a shared edge or pivots on a shared corner — nothing overlaps.</p>
         <div class="progress-wrap" aria-label="Puzzle progress">
           <div class="progress-copy"><span>FORMING</span><strong id="progress-number">00%</strong></div>
           <div class="progress-track"><span id="progress-bar"></span></div>
@@ -1231,7 +1206,7 @@ const TEMPLATE = `
           <g id="guide-layer" transform="translate(0 90)" aria-hidden="true"></g>
         </svg>
         <div class="board-caption"><span>SCRAMBLE</span><span>SILHOUETTE</span></div>
-        <div id="action-dock" class="action-dock" aria-live="polite"></div>
+        <div id="notice" class="notice" role="status" aria-live="polite"></div>
       </section>
 
       <aside class="side-tools">
@@ -1241,9 +1216,9 @@ const TEMPLATE = `
       </aside>
     </section>
 
-    <p class="mobile-hint"><button type="button" class="mobile-hint-link" id="mobile-rules-link">How it moves</button> · Slide a side · pivot a corner · tap <strong>Group</strong> to combine pieces</p>
+    <p class="mobile-hint"><button type="button" class="mobile-hint-link" id="mobile-rules-link">How it moves</button> · Drag a shared edge · arc a shared corner · tap <strong>Group</strong> to combine pieces</p>
 
-    <footer><span>Slide a side · pivot a corner · <kbd>⇧</kbd>click to group</span><span class="footer-hint"><kbd>←</kbd><kbd>→</kbd> choose · <kbd>[</kbd><kbd>]</kbd> turn · <kbd>H</kbd> silhouette</span><span>Turns snap to 45°</span></footer>
+    <footer><span>Drag a shared edge · arc a corner · <kbd>⇧</kbd>click to group</span><span class="footer-hint"><kbd>←</kbd><kbd>→</kbd> choose · <kbd>[</kbd><kbd>]</kbd> turn · <kbd>H</kbd> silhouette</span><span>Turns snap to 45°</span></footer>
   </main>
 
   <aside class="rules-panel" id="rules-panel" role="dialog" aria-modal="true" aria-labelledby="rules-title" aria-hidden="true">

@@ -22,7 +22,6 @@
   --panel-muted: oklch(75% 0.015 95);
   --panel-text: oklch(72% 0.012 95);
   --panel-foot: oklch(62% 0.01 95);
-  --dock-muted: oklch(72% 0.01 95);
   --shadow-ink: oklch(22% 0.02 70 / 0.15);
   --silhouette: oklch(28.5% 0.018 115 / 0.11);
   --success: oklch(42% 0.1 145);
@@ -62,7 +61,7 @@ main { min-height: 100vh; min-height: 100dvh; display: grid; grid-template-rows:
 .brand-name { font-weight: 600; letter-spacing: .24em; font-size: .82rem; }
 .puzzle-meta { display: flex; align-items: center; gap: 16px; font-size: .69rem; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); }
 .hairline { width: 56px; height: 1px; background: var(--line); }
-.text-button { justify-self: end; border: 0; border-bottom: 1px solid var(--ink); padding: 9px 0 7px; background: transparent; color: var(--ink); font-size: .75rem; cursor: pointer; }
+.text-button { justify-self: end; border: 0; border-bottom: 1px solid var(--ink); padding: 9px 0 7px; background: transparent; color: var(--ink); font-size: .75rem; cursor: pointer; text-decoration: none; }
 .text-button:hover { color: var(--vermilion); border-color: var(--vermilion); }
 
 .game-shell { min-height: 630px; display: grid; grid-template-columns: minmax(185px, 1fr) minmax(520px, 760px) minmax(66px, 1fr); align-items: center; gap: clamp(20px, 3vw, 56px); padding: 24px 0 18px; }
@@ -112,19 +111,6 @@ h1 em { color: var(--vermilion); font-style: normal; }
 .pivot-dot { fill: var(--paper); stroke: var(--vermilion); stroke-width: 2.5; vector-effect: non-scaling-stroke; pointer-events: none; animation: guide-in 320ms ease-out both; }
 @keyframes guide-in { from { opacity: 0; stroke-dashoffset: 20; } to { opacity: 1; stroke-dashoffset: 0; } }
 
-.action-dock { position: absolute; z-index: 4; left: 50%; bottom: -32px; min-width: 245px; min-height: 64px; transform: translateX(-50%); display: flex; align-items: center; justify-content: center; gap: 14px; background: var(--ink); color: var(--paper); box-shadow: 0 12px 28px var(--shadow-ink); pointer-events: none; }
-.action-dock:empty { display: none; }
-.action-dock > span:not(.pulse-dot):not(.locked-mark) { display: flex; flex-direction: column; gap: 3px; }
-.action-dock strong { font-size: .72rem; font-weight: 500; }
-.action-dock small { color: var(--dock-muted); font-size: .6rem; }
-.pulse-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--vermilion); animation: dot-pulse 2.4s ease-in-out infinite; }
-@keyframes dot-pulse { 50% { opacity: .45; } }
-.drag-meter { width: 54px; height: 2px; overflow: hidden; background: oklch(93.2% 0.018 95 / 0.2); }
-.drag-meter i { display: block; width: 100%; height: 100%; transform-origin: left; background: var(--vermilion-bright); }
-#move-button:hover { background: oklch(32% 0.018 115); }
-#move-button small { color: var(--dock-muted); font-size: .59rem; }
-.move-symbol { color: var(--vermilion-bright); font-family: serif; font-size: 1.5rem; }
-.locked-mark { color: var(--vermilion-bright); font-family: serif; font-size: 1.3rem; }
 .notice { position: absolute; z-index: 5; top: 16px; left: 50%; transform: translate(-50%, -10px); padding: 8px 12px; background: var(--paper-veil); color: var(--muted); font-family: 'Noto Serif JP', serif; font-size: .68rem; opacity: 0; transition: opacity 200ms ease, transform 300ms cubic-bezier(.16,1,.3,1); pointer-events: none; }
 
 .modifier-zone {
@@ -278,7 +264,6 @@ kbd { min-width: 20px; height: 20px; display: inline-grid; place-items: center; 
   .move-count span { font-size: 1rem; }
   footer { display: none; }
   .mobile-hint { display: block; }
-  .action-dock { bottom: -36px; min-width: min(260px, calc(100% - 30px)); }
   .board-caption { bottom: 8px; }
 }
 
