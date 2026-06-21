@@ -189,7 +189,11 @@ export function createContactEngine(placements, boardBounds = DEFAULT_BOARD) {
     const start = placements[id];
     const flip = placementFlip(start);
     let last = 0;
-    for (let angle = 0.6; angle <= 180; angle += 0.6) {
+    // Sweep until the first collision, up to nearly a full turn. The ceiling is
+    // just shy of 360° so a corner with clear space all around can keep rotating
+    // past 180° (it still stops dead at the first obstruction); 360° is excluded
+    // because that lands back on the start.
+    for (let angle = 0.6; angle < 360; angle += 0.6) {
       if (!lawful(id, placeFromPivot(worldPivot, pivot, start[2] + sign * angle, flip), others)) break;
       last = angle;
     }

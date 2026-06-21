@@ -32,10 +32,16 @@ const {
   localPivot, slideLimit, rotateLimit, cornerCanRotate
 } = contact;
 
-// How close a grab must land to a contact corner to read as a pivot. Generous
-// so the small, sharp tips (e.g. the parallelogram's 45° corner) are easy to
-// catch; an actual slide is still recognised inside this zone by its motion.
-const CORNER_GRAB = 32;
+// Intent is read from the *shape* of the drag, not where it was grabbed. A slide
+// runs along a rail; a rotation arcs perpendicular to the pivot→grab radius —
+// the two are geometrically orthogonal, so they separate cleanly once the finger
+// has travelled a little. These constants tune that read:
+const DEAD_ZONE = 8;       // px of travel before any interpretation begins
+const COMMIT_SEP = 0.16;   // alignment margin one hypothesis must lead by to lock
+const MIN_SLIDE_PX = 6;    // real along-rail travel before a slide commits
+const MIN_ROT_DEG = 4;     // real swept angle before a rotation commits
+const HARD_COMMIT = 24;    // past this much travel, stop waiting and pick the leader
+const CORNER_BIAS = 16;    // grabbing this close to a corner tip leans toward a pivot
 // Within this many degrees of a reachable 45° stop, a live rotation sticks to
 // it — sharp-corner turns no longer demand pixel-perfect aim.
 const ROT_MAGNET = 9;
@@ -255,50 +261,77 @@ function beginDrag(event, piece, element) {
   render();
 }
 
-function decideGesture(d, u, point) {
-  const grab = d.grab;
-  const pivot = d.corners.length ? d.corners.slice().sort((a, b) => dist(a, grab) - dist(b, grab))[0] : null;
-  const startSlide = (rail) => {
-    d.mode = 'slide'; d.dir = rail.dir; d.rail = rail;
-    d.negLimit = slideLimit(d.piece.id, -1, rail.dir, d.hood);
-    d.posLimit = slideLimit(d.piece.id, 1, rail.dir, d.hood);
-  };
-  const startRotate = (pv) => {
-    d.mode = 'rotate'; d.pivot = pv; d.lp = localPivot(d.piece.id, pv);
-    d.flip = placementFlip(d.start);
-    d.startAngle = Math.atan2(point[1] - pv[1], point[0] - pv[0]);
-    d.negLimit = rotateLimit(d.piece.id, -1, pv, d.lp, d.hood);
-    d.posLimit = rotateLimit(d.piece.id, 1, pv, d.lp, d.hood);
-  };
-  const rotatable = () => d.negLimit > 0.5 || d.posLimit > 0.5;
-  const bestRail = () => {
-    let best = null; let bestScore = -1;
-    for (const r of d.rails) {
-      const score = Math.abs(dot(u, r.dir)) * (segDist(grab, r.seg[0], r.seg[1]) < 55 ? 1 : 0.001);
-      if (score > bestScore) { bestScore = score; best = r; }
-    }
-    return best;
-  };
-  const rail = bestRail();
-  // How well the motion lines up with the candidate rail. Near a corner this is
-  // what separates intent: dragging *along* the edge slides, arcing *across* it
-  // (low alignment) rotates — so even the middle of a tiny piece still slides,
-  // while a flick around a sharp tip reliably turns.
-  const slideAlong = rail ? Math.abs(dot(u, rail.dir)) : 0;
-  const nearCorner = pivot && dist(pivot, grab) <= CORNER_GRAB;
-  const wantsSlide = rail && (!nearCorner || slideAlong >= 0.7);
+function startSlide(d, rail, point) {
+  d.mode = 'slide'; d.dir = rail.dir; d.rail = rail; d.grab = point;
+  d.negLimit = slideLimit(d.piece.id, -1, rail.dir, d.hood);
+  d.posLimit = slideLimit(d.piece.id, 1, rail.dir, d.hood);
+}
 
-  if (wantsSlide) {
-    startSlide(rail);
-  } else if (pivot) {
-    startRotate(pivot);
-    // Pivot is pinned both ways — fall back to a slide if the motion allows one.
-    if (!rotatable() && rail) startSlide(rail);
-    else if (!rotatable()) d.mode = 'pending';
-  } else if (rail) {
-    startSlide(rail);
+function startRotate(d, pivot, point) {
+  d.mode = 'rotate'; d.pivot = pivot; d.lp = localPivot(d.piece.id, pivot);
+  d.flip = placementFlip(d.start);
+  d.startAngle = Math.atan2(point[1] - pivot[1], point[0] - pivot[0]);
+  d.lastAngle = d.startAngle; // accumulate per-move so a turn past 180° doesn't wrap
+  d.accum = 0;
+  d.negLimit = rotateLimit(d.piece.id, -1, pivot, d.lp, d.hood);
+  d.posLimit = rotateLimit(d.piece.id, 1, pivot, d.lp, d.hood);
+}
+
+// Interpret a still-pending drag. Called every move until one reading clearly
+// wins, so a hesitant or wrong first flick self-corrects instead of locking. The
+// read is geometric: how well the accumulated motion lies *along* the best rail
+// (slide) versus *across* the radius from a rotatable corner (arc). Grab position
+// no longer gates rotation — only a small bias toward a corner tip remains.
+function decideGesture(d, point) {
+  const motion = sub(point, d.grab);
+  const m = len(motion);
+  if (m < DEAD_ZONE) return;
+  const u = [motion[0] / m, motion[1] / m];
+  const grab = d.grab;
+
+  // Best rail: the one the motion runs most along, preferring nearby edges. Only
+  // a real opening in the intended direction counts as feasible.
+  let rail = null; let railScore = -1;
+  for (const r of d.rails) {
+    const score = Math.abs(dot(u, r.dir)) * (segDist(grab, r.seg[0], r.seg[1]) < 60 ? 1 : 0.001);
+    if (score > railScore) { railScore = score; rail = r; }
   }
-  render();
+  const along = rail ? dot(motion, rail.dir) : 0;
+  const railLimit = rail ? slideLimit(d.piece.id, along >= 0 ? 1 : -1, rail.dir, d.hood) : 0;
+  const railFeasible = !!rail && railLimit > 8;
+  const slideAlign = rail ? Math.abs(dot(u, rail.dir)) : 0;
+
+  // Best pivot: the rotatable contact corner whose arc-tangent the motion best
+  // follows. A grab right on a tip (tiny radius) reads as a pivot outright.
+  let pivot = null; let rotAlign = 0; let pivotRadius = 0; let nearestCorner = Infinity;
+  for (const c of d.corners) {
+    nearestCorner = Math.min(nearestCorner, dist(grab, c));
+    if (!cornerCanRotate(d.piece.id, c, d.hood)) continue;
+    const rad = sub(grab, c);
+    const rl = len(rad);
+    const tanAlign = rl < 12 ? 1 : Math.abs(dot(u, [-rad[1] / rl, rad[0] / rl]));
+    if (tanAlign > rotAlign) { rotAlign = tanAlign; pivot = c; pivotRadius = rl; }
+  }
+  const rotFeasible = !!pivot;
+  const sweptDeg = !pivot ? 0
+    : pivotRadius < 1 ? 90
+    : Math.abs(dot(motion, [-(grab[1] - pivot[1]) / pivotRadius, (grab[0] - pivot[0]) / pivotRadius])) / pivotRadius * 180 / Math.PI;
+
+  if (railFeasible && !rotFeasible) { startSlide(d, rail, point); render(); return; }
+  if (rotFeasible && !railFeasible) {
+    if (sweptDeg >= MIN_ROT_DEG || nearestCorner < CORNER_BIAS) { startRotate(d, pivot, point); render(); }
+    return;
+  }
+  if (!railFeasible && !rotFeasible) return;
+
+  // Both are possible: commit to whichever the motion clearly favours, once it
+  // has travelled far enough to be deliberate. A corner-tip grab tips ties toward
+  // the pivot, preserving the "arc a corner" feel.
+  let sep = slideAlign - rotAlign;
+  if (nearestCorner < CORNER_BIAS) sep -= 0.25;
+  if (sep > COMMIT_SEP && Math.abs(along) >= MIN_SLIDE_PX) { startSlide(d, rail, point); render(); }
+  else if (sep < -COMMIT_SEP && sweptDeg >= MIN_ROT_DEG) { startRotate(d, pivot, point); render(); }
+  else if (m >= HARD_COMMIT) { (sep >= 0 && railFeasible) ? startSlide(d, rail, point) : startRotate(d, pivot, point); render(); }
 }
 
 function beginGroupDrag(event, element) {
@@ -312,19 +345,11 @@ function beginGroupDrag(event, element) {
   const staticPolys = pieces.filter((p) => !selection.has(p.id)).map((p) => worldPoints(p, placements[p.id]));
   dragState = { pointerId: event.pointerId, element, type: 'group', mode: 'translate', members, starts, staticPolys, grab: grabPoint, delta: [0, 0], angle: 0, moved: 0 };
   dragState.rails = groupRails(dragState);
-  const pivot = groupCorners(members).sort((a, b) => dist(a, grabPoint) - dist(b, grabPoint))[0];
-  if (pivot && dist(pivot, grabPoint) <= CORNER_GRAB) {
-    dragState.mode = 'rotate';
-    dragState.pivot = pivot;
-    dragState.startAngle = Math.atan2(grabPoint[1] - pivot[1], grabPoint[0] - pivot[0]);
-    dragState.negLimit = groupRotationLimit(dragState, -1);
-    dragState.posLimit = groupRotationLimit(dragState, 1);
-    if (dragState.negLimit < 0.5 && dragState.posLimit < 0.5) dragState.mode = 'translate';
-  }
-  // With static neighbours, a group slides on a rail just like a single piece:
-  // wait for the drag direction, then ride the best-aligned shared edge. Only
-  // the all-selected case (nothing static) keeps the free 2D translate.
-  if (dragState.mode === 'translate' && staticPolys.length) dragState.mode = 'pending';
+  dragState.pivots = groupCorners(members);
+  // With static neighbours the group obeys the contact law just like a single
+  // piece: wait for the drag, then read slide-vs-pivot from the motion's shape.
+  // Only the all-selected case (nothing static) keeps the free 2D translate.
+  if (staticPolys.length) dragState.mode = 'pending';
   render();
 }
 
@@ -433,18 +458,62 @@ function groupSlideLimit(d, dir, sign) {
   return last;
 }
 
-function decideGroupGesture(d, u) {
-  let best = null;
-  let bestScore = -1;
+// Group analogue of decideGesture: same geometric read (slide along a shared
+// rail vs. arc around a shared corner), same self-correcting pending window.
+function decideGroupGesture(d, point) {
+  const motion = sub(point, d.grab);
+  const m = len(motion);
+  if (m < DEAD_ZONE) return;
+  const u = [motion[0] / m, motion[1] / m];
+  const grab = d.grab;
+
+  let rail = null; let railScore = -1;
   for (const r of d.rails) {
-    const score = Math.abs(dot(u, r.dir)) * (segDist(d.grab, r.seg[0], r.seg[1]) < 80 ? 1 : 0.001);
-    if (score > bestScore) { bestScore = score; best = r; }
+    const score = Math.abs(dot(u, r.dir)) * (segDist(grab, r.seg[0], r.seg[1]) < 90 ? 1 : 0.001);
+    if (score > railScore) { railScore = score; rail = r; }
   }
-  if (!best) return;
-  d.mode = 'slide'; d.dir = best.dir; d.rail = best;
-  d.negLimit = groupSlideLimit(d, best.dir, -1);
-  d.posLimit = groupSlideLimit(d, best.dir, 1);
-  render();
+  const slideAlign = rail ? Math.abs(dot(u, rail.dir)) : 0;
+
+  let pivot = null; let rotAlign = 0; let pivotRadius = 0; let nearestCorner = Infinity;
+  for (const c of (d.pivots || [])) {
+    nearestCorner = Math.min(nearestCorner, dist(grab, c));
+    const rad = sub(grab, c);
+    const rl = len(rad);
+    const tanAlign = rl < 12 ? 1 : Math.abs(dot(u, [-rad[1] / rl, rad[0] / rl]));
+    if (tanAlign > rotAlign) { rotAlign = tanAlign; pivot = c; pivotRadius = rl; }
+  }
+  const sweptDeg = !pivot ? 0
+    : pivotRadius < 1 ? 90
+    : Math.abs(dot(motion, [-(grab[1] - pivot[1]) / pivotRadius, (grab[0] - pivot[0]) / pivotRadius])) / pivotRadius * 180 / Math.PI;
+
+  const trySlide = () => {
+    if (!rail) return false;
+    const neg = groupSlideLimit(d, rail.dir, -1);
+    const pos = groupSlideLimit(d, rail.dir, 1);
+    if (neg < 8 && pos < 8) return false;
+    d.mode = 'slide'; d.dir = rail.dir; d.rail = rail; d.grab = point;
+    d.negLimit = neg; d.posLimit = pos;
+    return true;
+  };
+  const tryRotate = () => {
+    if (!pivot) return false;
+    const neg = groupRotationLimit({ ...d, pivot }, -1);
+    const pos = groupRotationLimit({ ...d, pivot }, 1);
+    if (neg < 0.5 && pos < 0.5) return false;
+    d.mode = 'rotate'; d.pivot = pivot;
+    d.startAngle = Math.atan2(point[1] - pivot[1], point[0] - pivot[0]);
+    d.lastAngle = d.startAngle; d.accum = 0;
+    d.negLimit = neg; d.posLimit = pos;
+    return true;
+  };
+
+  let sep = slideAlign - rotAlign;
+  if (nearestCorner < CORNER_BIAS) sep -= 0.25;
+  let committed = false;
+  if (sep > COMMIT_SEP) committed = trySlide() || tryRotate();
+  else if (sep < -COMMIT_SEP && (sweptDeg >= MIN_ROT_DEG || nearestCorner < CORNER_BIAS)) committed = tryRotate() || trySlide();
+  else if (m >= HARD_COMMIT) committed = sep >= 0 ? (trySlide() || tryRotate()) : (tryRotate() || trySlide());
+  if (committed) render();
 }
 
 // Click a sliding group onto a vertex alignment along its rail, so it lands on
@@ -526,7 +595,9 @@ function groupRotationValid(angle, d) {
 
 function groupRotationLimit(d, sign) {
   let last = 0;
-  for (let angle = 0.6; angle <= 180; angle += 0.6) {
+  // Match single-piece rotation: sweep until the first collision, up to nearly a
+  // full turn, so a clear pivot isn't artificially capped at a half-turn.
+  for (let angle = 0.6; angle < 360; angle += 0.6) {
     if (!groupRotationValid(sign * angle, d)) break;
     last = angle;
   }
@@ -588,14 +659,14 @@ function updateDrag(event) {
   const point = [board.x, board.y];
   if (dragState.type === 'group') {
     if (dragState.mode === 'pending') {
-      const drag = sub(point, dragState.grab);
-      if (len(drag) < 5) return;
-      decideGroupGesture(dragState, unit(drag));
-      if (dragState.mode === 'pending') return;
+      decideGroupGesture(dragState, point);
+      if (dragState.mode === 'pending') { renderGuide(); updateDragDock(); return; }
     }
     if (dragState.mode === 'rotate') {
       const angle = Math.atan2(point[1] - dragState.pivot[1], point[0] - dragState.pivot[0]);
-      const raw = clamp(normalizedAngleDelta(angle - dragState.startAngle) * 180 / Math.PI, -dragState.negLimit, dragState.posLimit);
+      dragState.accum = clamp(dragState.accum + normalizedAngleDelta(angle - dragState.lastAngle) * 180 / Math.PI, -dragState.negLimit, dragState.posLimit);
+      dragState.lastAngle = angle;
+      const raw = dragState.accum;
       const snapped = Math.round(raw / ROT_SNAP) * ROT_SNAP;
       const inRange = snapped >= -dragState.negLimit - 0.01 && snapped <= dragState.posLimit + 0.01;
       dragState.angle = inRange && Math.abs(raw - snapped) <= ROT_MAGNET ? snapped : raw;
@@ -613,10 +684,8 @@ function updateDrag(event) {
     return;
   }
   if (dragState.mode === 'pending') {
-    const drag = sub(point, dragState.grab);
-    if (len(drag) < 5) return;
-    decideGesture(dragState, unit(drag), point);
-    if (dragState.mode === 'pending') return;
+    decideGesture(dragState, point);
+    if (dragState.mode === 'pending') { renderGuide(); updateDragDock(); return; }
   }
   if (dragState.mode === 'slide') {
     const s = clamp(dot(sub(point, dragState.grab), dragState.dir), -dragState.negLimit, dragState.posLimit);
@@ -624,8 +693,11 @@ function updateDrag(event) {
     dragState.current = placeAlong(dragState.start, dragState.dir, s);
   } else {
     const angle = Math.atan2(point[1] - dragState.pivot[1], point[0] - dragState.pivot[0]);
-    const raw = clamp(normalizedAngleDelta(angle - dragState.startAngle) * 180 / Math.PI, -dragState.negLimit, dragState.posLimit);
-    const deg = magnetizeRotation(dragState, raw);
+    // Accumulate small per-move increments (each well under 180°), so a continuous
+    // turn past ±180° keeps climbing instead of wrapping and snapping back.
+    dragState.accum = clamp(dragState.accum + normalizedAngleDelta(angle - dragState.lastAngle) * 180 / Math.PI, -dragState.negLimit, dragState.posLimit);
+    dragState.lastAngle = angle;
+    const deg = magnetizeRotation(dragState, dragState.accum);
     dragState.moved = Math.abs(deg);
     dragState.current = placeFromPivot(dragState.pivot, dragState.lp, dragState.start[2] + deg, dragState.flip);
   }
@@ -705,7 +777,6 @@ async function finishDrag(event) {
       movesMade += 1;
       render();
       if (solved()) window.setTimeout(showComplete, 420);
-      else showNotice(`Moved ${d.members.length} pieces together.`);
     } else render();
     return;
   }
@@ -730,7 +801,6 @@ async function finishDrag(event) {
     isAnimating = false;
     render();
     if (solved()) window.setTimeout(showComplete, 420);
-    else showNotice(d.mode === 'rotate' ? 'Pivoted on a shared corner.' : 'Slid along the contact edge.');
   } else {
     d.element.setAttribute('transform', transformString(before));
     selected = d.piece.id;
@@ -763,21 +833,20 @@ function keyRotate(sign) {
   if (!selected || isAnimating) return;
   if (selection.size > 1) { keyRotateGroup(sign); return; }
   const corners = contactCorners(selected);
-  if (!corners.length) { showNotice('No shared corner to pivot on.'); return; }
+  if (!corners.length) return;
   const hood = neighbourhood(selected);
   const pivot = corners[0];
   const lp = localPivot(selected, pivot);
   const start = placements[selected];
   const target = (Math.round(start[2] / ROT_SNAP) + sign) * ROT_SNAP;
   const candidate = placeFromPivot(pivot, lp, target, placementFlip(start));
-  if (!lawful(selected, candidate, hood)) { showNotice('That turn is blocked.'); return; }
+  if (!lawful(selected, candidate, hood)) return;
   history.push(snapshot());
   placements[selected] = candidate;
   settle([selected]);
   movesMade += 1;
   render();
   if (solved()) window.setTimeout(showComplete, 420);
-  else showNotice('Pivoted on a shared corner.');
 }
 
 function keyRotateGroup(sign) {
@@ -797,10 +866,8 @@ function keyRotateGroup(sign) {
     movesMade += 1;
     render();
     if (solved()) window.setTimeout(showComplete, 420);
-    else showNotice(`Pivoted ${members.length} pieces together.`);
     return;
   }
-  showNotice('That group turn is blocked.');
 }
 
 // --- win / state -----------------------------------------------------------
@@ -839,7 +906,6 @@ function undo() {
   pieces.forEach((p) => { placements[p.id] = [...prev[p.id]]; });
   movesMade = Math.max(0, movesMade - 1);
   render();
-  showNotice('One move reversed.');
 }
 
 function reset() {
@@ -852,7 +918,6 @@ function reset() {
   dragState = null;
   closeComplete();
   render();
-  showNotice('Scramble restored.');
 }
 
 // --- rendering -------------------------------------------------------------
@@ -915,6 +980,28 @@ function renderGuide() {
     } else if (dragState.mode === 'slide' && dragState.rail) {
       const [[x1, y1], [x2, y2]] = dragState.rail.seg;
       guideLayer.insertAdjacentHTML('beforeend', `<line class="available-edge-halo is-engaged" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/><line class="available-edge is-engaged" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`);
+    } else if (dragState.mode === 'pending') {
+      // Still interpreting: show every shared rail and corner the group could ride.
+      for (const rail of (dragState.rails || [])) {
+        const [[x1, y1], [x2, y2]] = rail.seg;
+        guideLayer.insertAdjacentHTML('beforeend', `<line class="slide-axis" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`);
+      }
+      for (const c of (dragState.pivots || [])) {
+        guideLayer.insertAdjacentHTML('beforeend', `<circle class="pivot-dot" cx="${c[0]}" cy="${c[1]}" r="4.5"/>`);
+      }
+    }
+    return;
+  }
+  if (dragState.mode === 'pending') {
+    // Still interpreting a single piece: keep every rail and rotatable corner lit
+    // so the player sees what their drag is being read against.
+    for (const rail of (dragState.rails || [])) {
+      const [[x1, y1], [x2, y2]] = rail.seg;
+      guideLayer.insertAdjacentHTML('beforeend', `<line class="slide-axis" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`);
+    }
+    for (const c of (dragState.corners || [])) {
+      if (!cornerCanRotate(dragState.piece.id, c, dragState.hood)) continue;
+      guideLayer.insertAdjacentHTML('beforeend', `<circle class="pivot-dot" cx="${c[0]}" cy="${c[1]}" r="4.5"/>`);
     }
     return;
   }
@@ -990,13 +1077,6 @@ function render() {
   document.querySelector('#undo-button').disabled = history.length === 0 || isAnimating;
 }
 
-function showNotice(message) {
-  const notice = document.querySelector('#notice');
-  clearTimeout(noticeTimer);
-  notice.textContent = message;
-  notice.classList.add('is-visible');
-  noticeTimer = setTimeout(() => notice.classList.remove('is-visible'), 2600);
-}
 
 function closeComplete() {
   const screen = document.querySelector('#complete-screen');
@@ -1152,7 +1232,6 @@ const TEMPLATE = `
         </svg>
         <div class="board-caption"><span>SCRAMBLE</span><span>SILHOUETTE</span></div>
         <div id="action-dock" class="action-dock" aria-live="polite"></div>
-        <div id="notice" class="notice" role="status" aria-live="polite"></div>
       </section>
 
       <aside class="side-tools">
