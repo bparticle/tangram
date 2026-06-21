@@ -27,8 +27,16 @@ let startPlacements = {};
 const contact = createContactEngine(placements, BOARD);
 const {
   withinBounds, neighbourhood, lawful, lawfulNow, contactRails, contactCorners,
-  localPivot, slideLimit, rotateLimit
+  localPivot, slideLimit, rotateLimit, cornerCanRotate
 } = contact;
+
+// How close a grab must land to a contact corner to read as a pivot. Generous
+// so the small, sharp tips (e.g. the parallelogram's 45° corner) are easy to
+// catch; an actual slide is still recognised inside this zone by its motion.
+const CORNER_GRAB = 32;
+// Within this many degrees of a reachable 45° stop, a live rotation sticks to
+// it — sharp-corner turns no longer demand pixel-perfect aim.
+const ROT_MAGNET = 9;
 
 let selected = null;
 const selection = new Set();
@@ -244,6 +252,7 @@ function decideGesture(d, u, point) {
     d.negLimit = rotateLimit(d.piece.id, -1, pv, d.lp, d.hood);
     d.posLimit = rotateLimit(d.piece.id, 1, pv, d.lp, d.hood);
   };
+  const rotatable = () => d.negLimit > 0.5 || d.posLimit > 0.5;
   const bestRail = () => {
     let best = null; let bestScore = -1;
     for (const r of d.rails) {
@@ -252,13 +261,24 @@ function decideGesture(d, u, point) {
     }
     return best;
   };
-  if (pivot && dist(pivot, grab) <= 20) {
+  const rail = bestRail();
+  // How well the motion lines up with the candidate rail. Near a corner this is
+  // what separates intent: dragging *along* the edge slides, arcing *across* it
+  // (low alignment) rotates — so even the middle of a tiny piece still slides,
+  // while a flick around a sharp tip reliably turns.
+  const slideAlong = rail ? Math.abs(dot(u, rail.dir)) : 0;
+  const nearCorner = pivot && dist(pivot, grab) <= CORNER_GRAB;
+  const wantsSlide = rail && (!nearCorner || slideAlong >= 0.7);
+
+  if (wantsSlide) {
+    startSlide(rail);
+  } else if (pivot) {
     startRotate(pivot);
-    if (d.negLimit < 0.5 && d.posLimit < 0.5) { const rail = bestRail(); if (rail) startSlide(rail); }
-  } else {
-    const rail = bestRail();
-    if (rail) startSlide(rail);
-    else if (pivot) startRotate(pivot);
+    // Pivot is pinned both ways — fall back to a slide if the motion allows one.
+    if (!rotatable() && rail) startSlide(rail);
+    else if (!rotatable()) d.mode = 'pending';
+  } else if (rail) {
+    startSlide(rail);
   }
   render();
 }
@@ -274,7 +294,7 @@ function beginGroupDrag(event, element) {
   const staticPolys = pieces.filter((p) => !selection.has(p.id)).map((p) => worldPoints(p, placements[p.id]));
   dragState = { pointerId: event.pointerId, element, type: 'group', mode: 'translate', members, starts, staticPolys, grab: grabPoint, delta: [0, 0], angle: 0, moved: 0 };
   const pivot = groupCorners(members).sort((a, b) => dist(a, grabPoint) - dist(b, grabPoint))[0];
-  if (pivot && dist(pivot, grabPoint) <= 20) {
+  if (pivot && dist(pivot, grabPoint) <= CORNER_GRAB) {
     dragState.mode = 'rotate';
     dragState.pivot = pivot;
     dragState.startAngle = Math.atan2(grabPoint[1] - pivot[1], grabPoint[0] - pivot[0]);
@@ -438,12 +458,24 @@ function updateDrag(event) {
     dragState.current = placeAlong(dragState.start, dragState.dir, s);
   } else {
     const angle = Math.atan2(point[1] - dragState.pivot[1], point[0] - dragState.pivot[0]);
-    const deg = clamp(normalizedAngleDelta(angle - dragState.startAngle) * 180 / Math.PI, -dragState.negLimit, dragState.posLimit);
+    const raw = clamp(normalizedAngleDelta(angle - dragState.startAngle) * 180 / Math.PI, -dragState.negLimit, dragState.posLimit);
+    const deg = magnetizeRotation(dragState, raw);
     dragState.moved = Math.abs(deg);
     dragState.current = placeFromPivot(dragState.pivot, dragState.lp, dragState.start[2] + deg, dragState.flip);
   }
   dragState.element.setAttribute('transform', transformString(dragState.current));
   updateDragDock();
+}
+
+// Pull a live rotation toward the nearest reachable 45° stop while dragging, so
+// the player lands turns without precise aim. Only the absolute angle that the
+// release-time snap would also accept is offered, and only within the swept
+// limits — the preview never promises a turn the commit would reject.
+function magnetizeRotation(d, deg) {
+  const snappedAbs = Math.round((d.start[2] + deg) / ROT_SNAP) * ROT_SNAP;
+  const snappedDeg = snappedAbs - d.start[2];
+  if (snappedDeg < -d.negLimit - 0.01 || snappedDeg > d.posLimit + 0.01) return deg;
+  return Math.abs(deg - snappedDeg) <= ROT_MAGNET ? snappedDeg : deg;
 }
 
 function snapRotation(d, place) {
@@ -685,9 +717,26 @@ function updateMasthead() {
   document.querySelector('#level-count').textContent = `${String(levelIndex + 1).padStart(2, '0')} / ${String(levels.length).padStart(2, '0')}`;
 }
 
+// Before any drag, show the selected piece where it can act: a dashed axis on
+// every edge it can ride, a dot on every corner it can pivot. This answers
+// "where do I grab, and which way will it slide?" without the player guessing.
+function renderAffordances() {
+  if (isAnimating || selection.size !== 1 || !selected) return;
+  const hood = neighbourhood(selected);
+  for (const rail of contactRails(selected)) {
+    const [[x1, y1], [x2, y2]] = rail.seg;
+    guideLayer.insertAdjacentHTML('beforeend', `<line class="slide-axis" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`);
+  }
+  for (const pivot of contactCorners(selected)) {
+    if (!cornerCanRotate(selected, pivot, hood)) continue;
+    guideLayer.insertAdjacentHTML('beforeend', `<circle class="pivot-dot" cx="${pivot[0]}" cy="${pivot[1]}" r="4.5"/>`);
+  }
+}
+
 function renderGuide() {
   guideLayer.innerHTML = '';
-  if (!dragState || dragState.locked) return;
+  if (!dragState) { renderAffordances(); return; }
+  if (dragState.locked) return;
   if (dragState.type === 'group') {
     if (dragState.mode === 'rotate') {
       const [cx, cy] = dragState.pivot;
@@ -745,7 +794,7 @@ function render() {
   else if (dragState?.locked) dock.innerHTML = `<span class="locked-mark">×</span><span><strong>NO CONTACT</strong><small>This piece touches nothing to ride</small></span>`;
   else if (dragState) updateDragDock();
   else if (selection.size >= 2) dock.innerHTML = `<span><strong>GROUP · ${selection.size} pieces</strong><small>Drag to move · arc a contact corner to rotate · shift-click to adjust</small></span>`;
-  else if (selected) dock.innerHTML = `<span><strong>${pieceById(selected).name}</strong><small>Drag to slide · arc a corner to pivot · shift-click to group</small></span>`;
+  else if (selected) dock.innerHTML = `<span><strong>${pieceById(selected).name}</strong><small>Drag a dashed edge to slide · arc a dotted corner to pivot</small></span>`;
   else dock.innerHTML = '';
   const solvedCount = pieces.filter(pieceSolved).length;
   const percent = Math.round((solvedCount / pieces.length) * 100);
@@ -843,7 +892,7 @@ const TEMPLATE = `
         <p class="eyebrow" id="assignment-eyebrow">Assignment</p>
         <h1 id="assignment-name">—</h1>
         <div class="goal-card"><div id="goal-thumb" class="goal-thumb" aria-label="Target silhouette"></div><button class="icon-button goal-hint" id="hint-button" aria-label="Toggle silhouette divisions" aria-pressed="false" title="Show silhouette divisions (H)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 1 4 10.5c-.7.7-1 1.2-1 2.5H9c0-1.3-.3-1.8-1-2.5A6 6 0 0 1 12 3z"/></svg></button></div>
-        <p class="lede">Form the silhouette. Drag a face to slide it along an edge it touches; arc a corner to pivot. Nothing overlaps.</p>
+        <p class="lede">Form the silhouette. A piece slides only where one of its sides rests along another's edge; arc a shared corner to pivot. Nothing overlaps.</p>
         <div class="progress-wrap" aria-label="Puzzle progress">
           <div class="progress-copy"><span>FORMING</span><strong id="progress-number">00%</strong></div>
           <div class="progress-track"><span id="progress-bar"></span></div>
@@ -873,18 +922,87 @@ const TEMPLATE = `
       </aside>
     </section>
 
-    <footer><span>Slide a face · pivot a corner · <kbd>⇧</kbd>click to group</span><span class="footer-hint"><kbd>←</kbd><kbd>→</kbd> choose · <kbd>[</kbd><kbd>]</kbd> turn · <kbd>H</kbd> silhouette</span><span>Turns snap to 45°</span></footer>
+    <footer><span>Slide a side · pivot a corner · <kbd>⇧</kbd>click to group</span><span class="footer-hint"><kbd>←</kbd><kbd>→</kbd> choose · <kbd>[</kbd><kbd>]</kbd> turn · <kbd>H</kbd> silhouette</span><span>Turns snap to 45°</span></footer>
   </main>
 
   <aside class="rules-panel" id="rules-panel" aria-hidden="true">
     <button class="close-rules" aria-label="Close rules">Close</button>
-    <p class="eyebrow">The three laws</p>
-    <ol>
-      <li><span>一</span><div><strong>Contact unlocks.</strong><p>A piece moves only where it touches the cluster. Floating pieces have nothing to ride.</p></div></li>
-      <li><span>二</span><div><strong>Edges are rails.</strong><p>Drag a face and it rides the shared edge, stopping at the first collision.</p></div></li>
-      <li><span>三</span><div><strong>Corners are pivots.</strong><p>Arc a shared corner; the turn sweeps until blocked, then snaps to 45°.</p></div></li>
+    <p class="eyebrow">How it moves</p>
+    <h2 class="rules-title">Three laws of contact</h2>
+
+    <ol class="laws">
+      <li class="law">
+        <div class="law-head"><span class="law-num">一</span><strong>Contact unlocks</strong></div>
+        <div class="law-body">
+          <svg class="law-fig" viewBox="0 0 88 60" aria-hidden="true">
+            <rect class="fig-solid" x="10" y="22" width="22" height="22"/>
+            <polygon class="fig-solid" points="32,22 32,44 54,44"/>
+            <polygon class="fig-ghost" points="60,12 82,12 60,34"/>
+            <line class="fig-x" x1="65" y1="17" x2="77" y2="29"/>
+            <line class="fig-x" x1="77" y1="17" x2="65" y2="29"/>
+          </svg>
+          <p>A piece can move only where it touches the cluster. A floating piece has nothing to ride — it stays put until something meets it.</p>
+        </div>
+      </li>
+
+      <li class="law">
+        <div class="law-head"><span class="law-num">二</span><strong>Sides are rails</strong></div>
+        <div class="law-body">
+          <svg class="law-fig" viewBox="0 0 88 60" aria-hidden="true">
+            <rect class="fig-solid" x="18" y="16" width="24" height="24"/>
+            <polygon class="fig-solid" points="42,16 64,16 42,40"/>
+            <line class="fig-axis" x1="42" y1="9" x2="42" y2="47"/>
+            <path class="fig-axis-arrow" d="M38 13 L42 9 L46 13"/>
+            <path class="fig-axis-arrow" d="M38 43 L42 47 L46 43"/>
+          </svg>
+          <p>A piece slides only where one of <em>its</em> sides lies flat along another's edge — drag that side and it rides the shared edge until it collides. A lone corner resting on an edge is <em>not</em> a rail: no side, no slide.</p>
+        </div>
+      </li>
+
+      <li class="law">
+        <div class="law-head"><span class="law-num">三</span><strong>Corners are pivots</strong></div>
+        <div class="law-body">
+          <svg class="law-fig" viewBox="0 0 88 60" aria-hidden="true">
+            <rect class="fig-solid" x="12" y="30" width="22" height="22"/>
+            <polygon class="fig-outline" points="34,30 56,30 34,10"/>
+            <path class="fig-arc" d="M56 30 A 22 22 0 0 0 49.6 14.4"/>
+            <path class="fig-arc-arrow" d="M53.4 16.4 L49.6 14.4 L51.4 18.2"/>
+            <circle class="fig-dot" cx="34" cy="30" r="3.4"/>
+          </svg>
+          <p>Arc a shared corner and the piece turns around it, needing just that one contact point and clear space to sweep. It stops at the first collision and clicks to 45° as you go.</p>
+        </div>
+      </li>
     </ol>
-    <p class="rules-foot">Press <kbd>H</kbd> or the bulb beside the assignment to reveal how its silhouette is divided. Movement feedback appears only while you act.</p>
+
+    <div class="rules-legend">
+      <p class="eyebrow small">Reading the board</p>
+      <ul>
+        <li>
+          <svg class="legend-mark" viewBox="0 0 22 22" aria-hidden="true"><line class="fig-axis" x1="3" y1="11" x2="19" y2="11"/></svg>
+          <span><strong>Dashed edge</strong> — a side resting on an edge: drag it to slide.</span>
+        </li>
+        <li>
+          <svg class="legend-mark" viewBox="0 0 22 22" aria-hidden="true"><circle class="fig-dot" cx="11" cy="11" r="4"/></svg>
+          <span><strong>Ringed corner</strong> — a shared corner: arc it to pivot.</span>
+        </li>
+        <li>
+          <svg class="legend-mark" viewBox="0 0 22 22" aria-hidden="true"><polygon class="fig-ghost" points="4,4 18,4 4,18"/></svg>
+          <span><strong>Dimmed piece</strong> — no contact, nothing to ride.</span>
+        </li>
+      </ul>
+    </div>
+
+    <div class="rules-legend">
+      <p class="eyebrow small">Controls</p>
+      <ul class="controls-list">
+        <li><span class="keys"><kbd>←</kbd><kbd>→</kbd></span> Choose a piece</li>
+        <li><span class="keys"><kbd>[</kbd><kbd>]</kbd></span> Turn it 45°</li>
+        <li><span class="keys"><kbd>⇧</kbd>click</span> Group pieces, then drag or arc them together</li>
+        <li><span class="keys"><kbd>H</kbd></span> Reveal how the silhouette is divided</li>
+      </ul>
+    </div>
+
+    <p class="rules-foot">Solved pieces settle exactly onto the silhouette. Movement guides appear only on the piece you've selected, so the board stays calm until you act.</p>
   </aside>
 
   <div class="complete-screen" id="complete-screen" aria-hidden="true">

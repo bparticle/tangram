@@ -5,6 +5,11 @@ import {
 
 export const DEFAULT_BOARD = { minX: -4, maxX: 764, minY: -88, maxY: 484 };
 
+// A slide is only legal where a *side* of the moving piece lies along an edge of
+// another piece. The collinear overlap that proves it must be at least this long
+// — a bare corner grazing an edge (zero-length overlap) is not enough to ride.
+export const MIN_RAIL_OVERLAP = 6;
+
 export const placeAlong = (start, direction, distance) => [
   start[0] + distance * direction[0],
   start[1] + distance * direction[1],
@@ -72,15 +77,15 @@ export function createContactEngine(placements, boardBounds = DEFAULT_BOARD) {
       if (other.id === id) continue;
       const otherPolygon = worldPoints(other, placements[other.id]);
       const otherEdges = edgesOf(otherPolygon);
+      // Only edge-on-edge contact yields a rail: one of this piece's sides must
+      // lie collinear with — and overlap, for a real length — one of the other's
+      // edges. Vertex-on-edge contact (a corner riding an edge on a single point)
+      // is deliberately *not* a rail, so a piece can never slide on a corner.
       for (const [a, b] of pieceEdges) for (const [c, d] of otherEdges) {
         const segment = collinearOverlap(a, b, c, d);
-        if (segment) found.push({ dir: unit(sub(b, a)), seg: segment });
-      }
-      for (const vertex of polygon) for (const [c, d] of otherEdges) {
-        if (pointOnSeg(vertex, c, d)) found.push({ dir: unit(sub(d, c)), seg: [c, d] });
-      }
-      for (const vertex of otherPolygon) for (const [a, b] of pieceEdges) {
-        if (pointOnSeg(vertex, a, b)) found.push({ dir: unit(sub(b, a)), seg: [a, b] });
+        if (segment && dist(segment[0], segment[1]) >= MIN_RAIL_OVERLAP) {
+          found.push({ dir: unit(sub(b, a)), seg: segment });
+        }
       }
     }
     const byLine = new Map();
