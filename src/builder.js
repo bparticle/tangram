@@ -794,7 +794,6 @@ function refresh() {
   if (phase === 'goal') {
     const overlapsFound = overlapPairs().length;
     if (overlapsFound) { status.textContent = `${overlapsFound} overlap${overlapsFound > 1 ? 's' : ''}`; status.className = 'build-status bad'; }
-    else if (!contact.connected()) { status.textContent = 'Goal must be connected'; status.className = 'build-status bad'; }
     else { status.textContent = 'Goal is valid'; status.className = 'build-status ok'; }
   } else {
     const moves = moveHistory.length;
@@ -814,7 +813,6 @@ function beginDeconstruction() {
   if (!name) { flash('Name the level first'); document.querySelector('#build-name').focus(); return; }
   if (overlapPairs().length) { flash('Fix overlaps before deconstructing'); return; }
   if (!allWithinBounds()) { flash('Keep every piece inside the board'); return; }
-  if (!contact.connected()) { flash('The goal must be one connected figure'); return; }
   targets = snapshot();
   moveHistory = [];
   clearSelection();
