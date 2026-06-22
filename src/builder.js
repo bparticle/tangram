@@ -1,9 +1,9 @@
 import {
-  PIECES, PIECE_BY_ID, ROT_SNAP, SNAP_VERTEX,
-  worldPoints, transformString, pointsString, centroid, edgesOf, overlaps, touches, pointOnSeg,
-  sub, dot, cross, len, unit, dist, clamp, rotateVec, normalizedAngleDelta, segDist, figureBounds, placementFlip
+  PIECES, PIECE_BY_ID, ROT_SNAP,
+  worldPoints, transformString, pointsString, centroid, edgesOf, overlaps, pointOnSeg,
+  sub, dot, len, dist, clamp, normalizedAngleDelta, figureBounds, placementFlip
 } from './shared.js';
-import { createContactEngine, DEFAULT_BOARD, placeAlong, placeFromPivot } from './contact-engine.js';
+import { createContactEngine, DEFAULT_BOARD, GESTURE, placeAlong, placeFromPivot } from './contact-engine.js';
 import { createLevel, deleteLevel, listLevels, updateLevel } from './levels.js';
 import { getSession, login, logout } from './auth.js';
 import { createModifierZone, coarsePointer } from './modifier-zone.js';
@@ -180,27 +180,19 @@ function beginGroupFreeformDrag(event, element) {
 
 // Deconstruct-phase group move: the selection travels as one rigid cluster but
 // obeys the contact rules against the pieces left behind (the "static" set) —
-// it stays touching them and never overlaps. Grab near a shared corner to pivot
-// the cluster, anywhere else to slide it.
+// it stays touching them and never overlaps. Exactly like the in-game group move:
+// the gesture (slide along a shared rail vs. arc a shared corner) is read from
+// the motion's shape via the shared engine, never from where it was grabbed.
 function beginGroupContactDrag(event, element) {
   element.setPointerCapture(event.pointerId);
   const point = clientToBoard(event);
   const grab = [point.x, point.y];
-  const members = [...selection];
-  const starts = {};
-  members.forEach((id) => { starts[id] = [...placements[id]]; });
-  const staticPolys = PIECES.filter((piece) => !selection.has(piece.id)).map((piece) => worldPoints(piece, placements[piece.id]));
-  drag = { type: 'group', kind: 'contact', pointerId: event.pointerId, element, members, starts, staticPolys, grab, delta: [0, 0], angle: 0, moved: 0, mode: 'translate' };
-  const pivot = groupCorners(members).sort((a, b) => dist(a, grab) - dist(b, grab))[0];
-  if (pivot && dist(pivot, grab) <= 20) {
-    drag.mode = 'rotate';
-    drag.pivot = pivot;
-    drag.startAngle = Math.atan2(grab[1] - pivot[1], grab[0] - pivot[0]);
-    drag.negLimit = groupRotationLimit(drag, -1);
-    drag.posLimit = groupRotationLimit(drag, 1);
-    if (drag.negLimit < 0.5 && drag.posLimit < 0.5) drag.mode = 'translate';
-  }
-  members.forEach((id) => { const node = pieceLayer.querySelector(`[data-id="${id}"]`); if (node) pieceLayer.appendChild(node); });
+  const body = contact.makeBody(selection);
+  drag = { type: 'group', kind: 'contact', pointerId: event.pointerId, element, body, members: body.members, grab, delta: [0, 0], angle: 0, moved: 0, mode: 'translate' };
+  drag.rails = contact.bodyRails(body);
+  drag.pivots = contact.bodyCorners(body);
+  if (body.staticPolys.length) drag.mode = 'pending';
+  body.members.forEach((id) => { const node = pieceLayer.querySelector(`[data-id="${id}"]`); if (node) pieceLayer.appendChild(node); });
   refresh();
 }
 
@@ -208,8 +200,9 @@ function beginContactDrag(event, piece, element) {
   element.setPointerCapture(event.pointerId);
   const point = clientToBoard(event);
   const grab = [point.x, point.y];
-  const corners = contact.contactCorners(piece.id);
-  const rails = contact.contactRails(piece.id);
+  const body = contact.makeBody([piece.id]);
+  const corners = contact.bodyCorners(body);
+  const rails = contact.bodyRails(body);
   if (!corners.length && !rails.length) {
     drag = { type: 'contact', pointerId: event.pointerId, element, piece, locked: true };
     element.classList.add('is-blocked');
@@ -219,51 +212,37 @@ function beginContactDrag(event, piece, element) {
     return;
   }
   drag = {
-    type: 'contact', pointerId: event.pointerId, element, piece, mode: 'pending',
-    hood: contact.neighbourhood(piece.id), rails, corners, grab,
+    type: 'contact', pointerId: event.pointerId, element, piece, body, mode: 'pending',
+    hood: body.staticPolys, rails, corners, grab,
     start: [...placements[piece.id]], current: [...placements[piece.id]], moved: 0
   };
   pieceLayer.appendChild(element);
   refresh();
 }
 
-function decideContactGesture(state, direction, point) {
-  const pivot = state.corners.length
-    ? state.corners.slice().sort((a, b) => dist(a, state.grab) - dist(b, state.grab))[0]
-    : null;
-  const bestRail = () => {
-    let best = null;
-    let bestScore = -1;
-    for (const rail of state.rails) {
-      const score = Math.abs(dot(direction, rail.dir)) * (segDist(state.grab, rail.seg[0], rail.seg[1]) < 55 ? 1 : 0.001);
-      if (score > bestScore) { bestScore = score; best = rail; }
-    }
-    return best;
-  };
-  const startSlide = (rail) => {
-    state.mode = 'slide';
-    state.dir = rail.dir;
-    state.negLimit = contact.slideLimit(state.piece.id, -1, rail.dir, state.hood);
-    state.posLimit = contact.slideLimit(state.piece.id, 1, rail.dir, state.hood);
-  };
-  const startRotate = (worldPivot) => {
-    state.mode = 'rotate';
-    state.pivot = worldPivot;
-    state.localPivot = contact.localPivot(state.piece.id, worldPivot);
-    state.flip = placementFlip(state.start);
-    state.startAngle = Math.atan2(point[1] - worldPivot[1], point[0] - worldPivot[0]);
-    state.negLimit = contact.rotateLimit(state.piece.id, -1, worldPivot, state.localPivot, state.hood);
-    state.posLimit = contact.rotateLimit(state.piece.id, 1, worldPivot, state.localPivot, state.hood);
-  };
-  if (pivot && dist(pivot, state.grab) <= 20) {
-    startRotate(pivot);
-    if (state.negLimit < 0.5 && state.posLimit < 0.5) { const rail = bestRail(); if (rail) startSlide(rail); }
+// Apply a committed gesture (from the shared engine) onto a contact-drag state.
+// Identical for a single piece and a group — the same one used by the game.
+function applyContactDecision(state, decision, point) {
+  if (decision.mode === 'slide') {
+    state.mode = 'slide'; state.dir = decision.dir; state.rail = decision.rail; state.grab = point;
+    state.negLimit = decision.negLimit; state.posLimit = decision.posLimit;
   } else {
-    const rail = bestRail();
-    if (rail) startSlide(rail);
-    else if (pivot) startRotate(pivot);
+    state.mode = 'rotate'; state.pivot = decision.pivot;
+    state.startAngle = Math.atan2(point[1] - decision.pivot[1], point[0] - decision.pivot[0]);
+    state.lastAngle = state.startAngle; state.accum = 0;
+    state.negLimit = decision.negLimit; state.posLimit = decision.posLimit;
+    if (state.start) { state.localPivot = contact.localPivot(state.piece.id, decision.pivot); state.flip = placementFlip(state.start); }
   }
   refresh();
+}
+
+// Pull a live rotation toward the nearest reachable 45° stop while dragging —
+// the same magnet the game uses, so deconstruction feels identical to play.
+function magnetizeContactRotation(state, deg) {
+  const snappedAbs = Math.round((state.start[2] + deg) / ROT_SNAP) * ROT_SNAP;
+  const snappedDeg = snappedAbs - state.start[2];
+  if (snappedDeg < -state.negLimit - 0.01 || snappedDeg > state.posLimit + 0.01) return deg;
+  return Math.abs(deg - snappedDeg) <= GESTURE.ROT_MAGNET ? snappedDeg : deg;
 }
 
 function movePointer(event) {
@@ -271,14 +250,29 @@ function movePointer(event) {
   event.preventDefault();
   if (drag.locked) return;
   const point = clientToBoard(event);
+  const worldPoint = [point.x, point.y];
   if (drag.type === 'group') {
     if (drag.kind === 'contact') {
+      if (drag.mode === 'pending') {
+        const decision = contact.bodyInterpret(drag.body, { grab: drag.grab, rails: drag.rails, corners: drag.pivots, point: worldPoint, railNear: GESTURE.RAIL_NEAR_GROUP });
+        if (decision) applyContactDecision(drag, decision, worldPoint);
+        if (drag.mode === 'pending') { renderGuides(); return; }
+      }
       if (drag.mode === 'rotate') {
-        const angle = Math.atan2(point.y - drag.pivot[1], point.x - drag.pivot[0]);
-        drag.angle = clamp(normalizedAngleDelta(angle - drag.startAngle) * 180 / Math.PI, -drag.negLimit, drag.posLimit);
+        const angle = Math.atan2(worldPoint[1] - drag.pivot[1], worldPoint[0] - drag.pivot[0]);
+        drag.accum = clamp(drag.accum + normalizedAngleDelta(angle - drag.lastAngle) * 180 / Math.PI, -drag.negLimit, drag.posLimit);
+        drag.lastAngle = angle;
+        const raw = drag.accum;
+        const snapped = Math.round(raw / ROT_SNAP) * ROT_SNAP;
+        const inRange = snapped >= -drag.negLimit - 0.01 && snapped <= drag.posLimit + 0.01;
+        drag.angle = inRange && Math.abs(raw - snapped) <= GESTURE.ROT_MAGNET ? snapped : raw;
         drag.moved = Math.abs(drag.angle);
+      } else if (drag.mode === 'slide') {
+        const s = clamp(dot(sub(worldPoint, drag.grab), drag.dir), -drag.negLimit, drag.posLimit);
+        drag.delta = [s * drag.dir[0], s * drag.dir[1]];
+        drag.moved = Math.abs(s);
       } else {
-        drag.delta = marchGroupContact(drag, sub([point.x, point.y], drag.grab));
+        drag.delta = contact.bodyMarch(drag.body, sub(worldPoint, drag.grab), drag.delta);
         drag.moved = len(drag.delta);
       }
       applyGroupContactTransforms(drag);
@@ -299,12 +293,10 @@ function movePointer(event) {
     drag.element.setAttribute('transform', transformString(placements[drag.id]));
     return;
   }
-  const worldPoint = [point.x, point.y];
   if (drag.mode === 'pending') {
-    const direction = sub(worldPoint, drag.grab);
-    if (len(direction) < 5) return;
-    decideContactGesture(drag, unit(direction), worldPoint);
-    if (drag.mode === 'pending') return;
+    const decision = contact.bodyInterpret(drag.body, { grab: drag.grab, rails: drag.rails, corners: drag.corners, point: worldPoint, railNear: GESTURE.RAIL_NEAR_PIECE });
+    if (decision) applyContactDecision(drag, decision, worldPoint);
+    if (drag.mode === 'pending') { renderGuides(); return; }
   }
   if (drag.mode === 'slide') {
     const distance = clamp(dot(sub(worldPoint, drag.grab), drag.dir), -drag.negLimit, drag.posLimit);
@@ -312,53 +304,15 @@ function movePointer(event) {
     drag.current = placeAlong(drag.start, drag.dir, distance);
   } else {
     const angle = Math.atan2(worldPoint[1] - drag.pivot[1], worldPoint[0] - drag.pivot[0]);
-    let delta = angle - drag.startAngle;
-    while (delta > Math.PI) delta -= Math.PI * 2;
-    while (delta < -Math.PI) delta += Math.PI * 2;
-    const degrees = clamp(delta * 180 / Math.PI, -drag.negLimit, drag.posLimit);
+    // Accumulate small per-move increments so a turn past ±180° keeps climbing
+    // instead of wrapping — matching the game's single-piece rotation exactly.
+    drag.accum = clamp(drag.accum + normalizedAngleDelta(angle - drag.lastAngle) * 180 / Math.PI, -drag.negLimit, drag.posLimit);
+    drag.lastAngle = angle;
+    const degrees = magnetizeContactRotation(drag, drag.accum);
     drag.moved = Math.abs(degrees);
     drag.current = placeFromPivot(drag.pivot, drag.localPivot, drag.start[2] + degrees, drag.flip);
   }
   drag.element.setAttribute('transform', transformString(drag.current));
-}
-
-function snapRotation(state, place) {
-  const previous = place[2] > state.start[2] + 0.01
-    ? Math.floor(place[2] / ROT_SNAP) * ROT_SNAP
-    : place[2] < state.start[2] - 0.01
-      ? Math.ceil(place[2] / ROT_SNAP) * ROT_SNAP
-      : state.start[2];
-  const candidates = [
-    Math.round(place[2] / ROT_SNAP) * ROT_SNAP,
-    previous,
-    state.start[2],
-  ];
-  for (const angle of candidates) {
-    if (angle < state.start[2] - state.negLimit - 0.01 || angle > state.start[2] + state.posLimit + 0.01) continue;
-    const candidate = placeFromPivot(state.pivot, state.localPivot, angle, state.flip);
-    if (contact.lawful(state.piece.id, candidate, state.hood)) return candidate;
-  }
-  return placeFromPivot(state.pivot, state.localPivot, state.start[2], state.flip);
-}
-
-function snapSlide(state, place) {
-  const distance = dot(sub(place, state.start), state.dir);
-  const moving = worldPoints(state.piece, place);
-  let bestDistance = distance;
-  let bestDelta = SNAP_VERTEX;
-  for (const other of state.hood) for (const neighbour of other) for (const vertex of moving) {
-    const difference = sub(neighbour, vertex);
-    if (Math.abs(cross(state.dir, difference)) > SNAP_VERTEX) continue;
-    const along = dot(difference, state.dir);
-    if (Math.abs(along) >= bestDelta) continue;
-    const candidateDistance = distance + along;
-    if (candidateDistance < -state.negLimit - 0.01 || candidateDistance > state.posLimit + 0.01) continue;
-    if (contact.lawful(state.piece.id, placeAlong(state.start, state.dir, candidateDistance), state.hood)) {
-      bestDelta = Math.abs(along);
-      bestDistance = candidateDistance;
-    }
-  }
-  return placeAlong(state.start, state.dir, bestDistance);
 }
 
 function endPointer(event) {
@@ -379,8 +333,11 @@ function endPointer(event) {
   }
   if (state.locked || state.mode === 'pending') { refresh(); return; }
   let target = state.current;
-  if (state.mode === 'rotate') target = snapRotation(state, target);
-  else target = snapSlide(state, target);
+  if (state.mode === 'rotate') {
+    target = placeFromPivot(state.pivot, state.localPivot, state.start[2] + contact.bodySnapRotation(state.body, state.pivot, state.accum, state.negLimit, state.posLimit), state.flip);
+  } else {
+    target = placeAlong(state.start, state.dir, contact.bodySnapSlide(state.body, state.dir, dot(sub(state.current, state.start), state.dir), state.negLimit, state.posLimit));
+  }
   const before = placements[state.piece.id];
   const changed = dist(target, before) > 0.5 || Math.abs(target[2] - before[2]) > 0.1;
   if (changed && contact.lawful(state.piece.id, target, state.hood)) {
@@ -398,7 +355,7 @@ function cancelPointer(event) {
   const state = drag;
   drag = null;
   state.element.classList.remove('is-blocked');
-  if (state.type === 'group') { for (const id of state.members) placements[id] = state.starts[id]; }
+  if (state.type === 'group') { const starts = state.body ? state.body.starts : state.starts; for (const id of state.members) placements[id] = starts[id]; }
   else if (state.type === 'freeform') placements[state.id] = state.start;
   else if (state.start) placements[state.piece.id] = state.start;
   refresh();
@@ -493,162 +450,41 @@ function snapGroupToNeighbours(members) {
 }
 
 // --- contact-constrained group moves (deconstruct phase) -------------------
-// A translated/rotated cluster is valid when every member stays in bounds, none
-// overlaps a static piece, and the cluster still touches the static set (so it
-// can never drift free and orphan the rest). Ported from the in-game group move
-// so an authored group reverse-move is always reproducible by a group play-move.
-
-function groupContactValid(delta, d) {
-  let inContact = d.staticPolys.length === 0;
-  for (const id of d.members) {
-    const s = d.starts[id];
-    const poly = worldPoints(PIECE_BY_ID[id], [s[0] + delta[0], s[1] + delta[1], s[2], placementFlip(s)]);
-    if (!contact.withinBounds(poly)) return false;
-    for (const staticPoly of d.staticPolys) {
-      if (overlaps(poly, staticPoly)) return false;
-      if (!inContact && touches(poly, staticPoly)) inContact = true;
-    }
-  }
-  return inContact;
-}
-
-function marchGroupContact(d, desired) {
-  let cur = d.delta;
-  for (let i = 0; i < 280; i += 1) {
-    const toGoal = sub(desired, cur);
-    const distance = len(toGoal);
-    if (distance < 0.4) break;
-    const step = Math.min(2, distance);
-    const u = [toGoal[0] / distance, toGoal[1] / distance];
-    let advanced = false;
-    for (const deg of [0, 12, -12, 25, -25, 40, -40, 58, -58, 75, -75]) {
-      const dir = deg === 0 ? u : rotateVec(u, deg * Math.PI / 180);
-      const cand = [cur[0] + dir[0] * step, cur[1] + dir[1] * step];
-      if (groupContactValid(cand, d)) { cur = cand; advanced = true; break; }
-    }
-    if (!advanced) break;
-  }
-  return cur;
-}
-
-function groupRotatedPlacements(d, angle) {
-  const radians = angle * Math.PI / 180;
-  const c = Math.cos(radians);
-  const s = Math.sin(radians);
-  const result = {};
-  for (const id of d.members) {
-    const start = d.starts[id];
-    const dx = start[0] - d.pivot[0];
-    const dy = start[1] - d.pivot[1];
-    result[id] = [d.pivot[0] + dx * c - dy * s, d.pivot[1] + dx * s + dy * c, start[2] + angle, placementFlip(start)];
-  }
-  return result;
-}
-
-function groupRotationValid(angle, d) {
-  const rotated = groupRotatedPlacements(d, angle);
-  let inContact = d.staticPolys.length === 0;
-  for (const id of d.members) {
-    const poly = worldPoints(PIECE_BY_ID[id], rotated[id]);
-    if (!contact.withinBounds(poly)) return false;
-    for (const staticPoly of d.staticPolys) {
-      if (overlaps(poly, staticPoly)) return false;
-      if (!inContact && touches(poly, staticPoly)) inContact = true;
-    }
-  }
-  return inContact;
-}
-
-function groupRotationLimit(d, sign) {
-  let last = 0;
-  for (let angle = 0.6; angle <= 180; angle += 0.6) {
-    if (!groupRotationValid(sign * angle, d)) break;
-    last = angle;
-  }
-  return last;
-}
-
-// Shared corners between the selected cluster and the static pieces — the points
-// the cluster can pivot around.
-function groupCorners(members) {
-  const set = new Set(members);
-  const points = [];
-  const add = (point) => { if (!points.some((other) => dist(other, point) < 1)) points.push(point); };
-  for (const id of members) {
-    const poly = worldPoints(PIECE_BY_ID[id], placements[id]);
-    const mineEdges = edgesOf(poly);
-    for (const other of PIECES) {
-      if (set.has(other.id)) continue;
-      const otherPoly = worldPoints(other, placements[other.id]);
-      const otherEdges = edgesOf(otherPoly);
-      for (const vertex of poly) if (otherPoly.some((w) => dist(vertex, w) < 0.8) || otherEdges.some(([c, d]) => pointOnSeg(vertex, c, d))) add(vertex);
-      for (const w of otherPoly) if (poly.some((vertex) => dist(vertex, w) < 0.8) || mineEdges.some(([a, b]) => pointOnSeg(w, a, b))) add(w);
-    }
-  }
-  return points;
-}
+// The cluster moves as one rigid body through the shared engine — exactly the
+// same calls the game uses — so an authored group reverse-move is always
+// reproducible by a group play-move, and the two can never drift apart.
 
 function applyGroupContactTransforms(d) {
-  if (d.mode === 'rotate') {
-    const rotated = groupRotatedPlacements(d, d.angle);
-    for (const id of d.members) pieceLayer.querySelector(`[data-id="${id}"]`).setAttribute('transform', transformString(rotated[id]));
-    return;
-  }
-  for (const id of d.members) {
-    const s = d.starts[id];
-    pieceLayer.querySelector(`[data-id="${id}"]`).setAttribute('transform', transformString([s[0] + d.delta[0], s[1] + d.delta[1], s[2], placementFlip(s)]));
-  }
-}
-
-function snapGroupContact(d) {
-  let best = null;
-  let bestDelta = SNAP_VERTEX;
-  for (const id of d.members) {
-    const s = d.starts[id];
-    const poly = worldPoints(PIECE_BY_ID[id], [s[0] + d.delta[0], s[1] + d.delta[1], s[2], placementFlip(s)]);
-    for (const vertex of poly) for (const staticPoly of d.staticPolys) for (const w of staticPoly) {
-      const off = sub(w, vertex);
-      const dd = len(off);
-      if (dd >= bestDelta) continue;
-      const cand = [d.delta[0] + off[0], d.delta[1] + off[1]];
-      if (groupContactValid(cand, d)) { bestDelta = dd; best = cand; }
-    }
-  }
-  if (best) d.delta = best;
+  const map = d.mode === 'rotate' ? contact.bodyRotate(d.body, d.pivot, d.angle) : contact.bodyTranslate(d.body, d.delta);
+  for (const id of d.members) pieceLayer.querySelector(`[data-id="${id}"]`).setAttribute('transform', transformString(map[id]));
 }
 
 function endGroupContact(d) {
   if (d.mode === 'rotate') {
-    const previous = d.angle > 0.01
-      ? Math.floor(d.angle / ROT_SNAP) * ROT_SNAP
-      : d.angle < -0.01
-        ? Math.ceil(d.angle / ROT_SNAP) * ROT_SNAP
-        : 0;
-    const candidates = [
-      Math.round(d.angle / ROT_SNAP) * ROT_SNAP,
-      previous,
-      0,
-    ];
-    for (const angle of candidates) {
-      if (angle < -d.negLimit - 0.01 || angle > d.posLimit + 0.01) continue;
-      if (groupRotationValid(angle, d)) {
-        d.angle = angle;
-        break;
-      }
-    }
-    if (Math.abs(d.angle) > 0.5 && groupRotationValid(d.angle, d)) {
+    const angle = contact.bodySnapRotation(d.body, d.pivot, d.angle, d.negLimit, d.posLimit);
+    if (Math.abs(angle) > 0.5 && contact.bodyValid(d.body, contact.bodyRotate(d.body, d.pivot, angle), 'touch')) {
       moveHistory.push(snapshot());
-      const rotated = groupRotatedPlacements(d, d.angle);
+      const rotated = contact.bodyRotate(d.body, d.pivot, angle);
       for (const id of d.members) placements[id] = rotated[id];
       showNotice(`Reverse-pivoted ${d.members.length} pieces together.`);
     }
     refresh();
     return;
   }
-  snapGroupContact(d);
-  if (len(d.delta) > 0.5 && groupContactValid(d.delta, d)) {
+  if (d.mode === 'pending') { refresh(); return; }
+  let valid;
+  if (d.mode === 'slide') {
+    const s = contact.bodySnapSlide(d.body, d.dir, dot(d.delta, d.dir), d.negLimit, d.posLimit);
+    d.delta = [s * d.dir[0], s * d.dir[1]];
+    valid = contact.bodyValid(d.body, contact.bodyTranslate(d.body, d.delta), 'touch');
+  } else {
+    d.delta = contact.bodySnapFree(d.body, d.delta);
+    valid = contact.bodyValid(d.body, contact.bodyTranslate(d.body, d.delta), 'edge');
+  }
+  if (len(d.delta) > 0.5 && valid) {
     moveHistory.push(snapshot());
-    for (const id of d.members) { const s = d.starts[id]; placements[id] = [s[0] + d.delta[0], s[1] + d.delta[1], s[2], placementFlip(s)]; }
+    const map = contact.bodyTranslate(d.body, d.delta);
+    for (const id of d.members) placements[id] = map[id];
     showNotice(`Reverse-slid ${d.members.length} pieces together.`);
   }
   refresh();
@@ -771,7 +607,7 @@ function renderGuides() {
   if (phase !== 'deconstruct' || drag?.locked) return;
   if (selection.size >= 2) {
     // Show the corners the cluster can pivot around; sliding works anywhere else.
-    for (const [cx, cy] of groupCorners([...selection])) {
+    for (const [cx, cy] of contact.bodyCorners(contact.makeBody([...selection]))) {
       guideLayer.insertAdjacentHTML('beforeend', `<circle class="pivot-point" cx="${cx}" cy="${cy}" r="4"/>`);
     }
     return;
