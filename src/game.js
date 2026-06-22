@@ -714,13 +714,30 @@ function magnetizeRotation(d, deg) {
   return Math.abs(deg - snappedDeg) <= ROT_MAGNET ? snappedDeg : deg;
 }
 
+function previousRotationStop(raw, start) {
+  if (raw > start + 0.01) return Math.floor(raw / ROT_SNAP) * ROT_SNAP;
+  if (raw < start - 0.01) return Math.ceil(raw / ROT_SNAP) * ROT_SNAP;
+  return start;
+}
+
+function previousRotationStep(raw) {
+  if (raw > 0.01) return Math.floor(raw / ROT_SNAP) * ROT_SNAP;
+  if (raw < -0.01) return Math.ceil(raw / ROT_SNAP) * ROT_SNAP;
+  return 0;
+}
+
 function snapRotation(d, place) {
-  const snapped = Math.round(place[2] / ROT_SNAP) * ROT_SNAP;
-  if (snapped >= d.start[2] - d.negLimit - 0.01 && snapped <= d.start[2] + d.posLimit + 0.01) {
-    const candidate = placeFromPivot(d.pivot, d.lp, snapped, d.flip);
+  const candidates = [
+    Math.round(place[2] / ROT_SNAP) * ROT_SNAP,
+    previousRotationStop(place[2], d.start[2]),
+    d.start[2],
+  ];
+  for (const angle of candidates) {
+    if (angle < d.start[2] - d.negLimit - 0.01 || angle > d.start[2] + d.posLimit + 0.01) continue;
+    const candidate = placeFromPivot(d.pivot, d.lp, angle, d.flip);
     if (lawful(d.piece.id, candidate, d.hood)) return candidate;
   }
-  return place;
+  return placeFromPivot(d.pivot, d.lp, d.start[2], d.flip);
 }
 
 function snapSlide(d, place) {
@@ -750,8 +767,18 @@ async function finishDrag(event) {
 
   if (d.type === 'group') {
     if (d.mode === 'rotate') {
-      const snapped = Math.round(d.angle / ROT_SNAP) * ROT_SNAP;
-      if (snapped >= -d.negLimit - 0.01 && snapped <= d.posLimit + 0.01 && groupRotationValid(snapped, d)) d.angle = snapped;
+      const candidates = [
+        Math.round(d.angle / ROT_SNAP) * ROT_SNAP,
+        previousRotationStep(d.angle),
+        0,
+      ];
+      for (const angle of candidates) {
+        if (angle < -d.negLimit - 0.01 || angle > d.posLimit + 0.01) continue;
+        if (groupRotationValid(angle, d)) {
+          d.angle = angle;
+          break;
+        }
+      }
       if (Math.abs(d.angle) > 0.5 && groupRotationValid(d.angle, d)) {
         history.push(snapshot());
         const rotated = groupRotatedPlacements(d, d.angle);

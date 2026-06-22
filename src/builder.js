@@ -323,12 +323,22 @@ function movePointer(event) {
 }
 
 function snapRotation(state, place) {
-  const snapped = Math.round(place[2] / ROT_SNAP) * ROT_SNAP;
-  if (snapped >= state.start[2] - state.negLimit - 0.01 && snapped <= state.start[2] + state.posLimit + 0.01) {
-    const candidate = placeFromPivot(state.pivot, state.localPivot, snapped, state.flip);
+  const previous = place[2] > state.start[2] + 0.01
+    ? Math.floor(place[2] / ROT_SNAP) * ROT_SNAP
+    : place[2] < state.start[2] - 0.01
+      ? Math.ceil(place[2] / ROT_SNAP) * ROT_SNAP
+      : state.start[2];
+  const candidates = [
+    Math.round(place[2] / ROT_SNAP) * ROT_SNAP,
+    previous,
+    state.start[2],
+  ];
+  for (const angle of candidates) {
+    if (angle < state.start[2] - state.negLimit - 0.01 || angle > state.start[2] + state.posLimit + 0.01) continue;
+    const candidate = placeFromPivot(state.pivot, state.localPivot, angle, state.flip);
     if (contact.lawful(state.piece.id, candidate, state.hood)) return candidate;
   }
-  return place;
+  return placeFromPivot(state.pivot, state.localPivot, state.start[2], state.flip);
 }
 
 function snapSlide(state, place) {
@@ -609,8 +619,23 @@ function snapGroupContact(d) {
 
 function endGroupContact(d) {
   if (d.mode === 'rotate') {
-    const snapped = Math.round(d.angle / ROT_SNAP) * ROT_SNAP;
-    if (snapped >= -d.negLimit - 0.01 && snapped <= d.posLimit + 0.01 && groupRotationValid(snapped, d)) d.angle = snapped;
+    const previous = d.angle > 0.01
+      ? Math.floor(d.angle / ROT_SNAP) * ROT_SNAP
+      : d.angle < -0.01
+        ? Math.ceil(d.angle / ROT_SNAP) * ROT_SNAP
+        : 0;
+    const candidates = [
+      Math.round(d.angle / ROT_SNAP) * ROT_SNAP,
+      previous,
+      0,
+    ];
+    for (const angle of candidates) {
+      if (angle < -d.negLimit - 0.01 || angle > d.posLimit + 0.01) continue;
+      if (groupRotationValid(angle, d)) {
+        d.angle = angle;
+        break;
+      }
+    }
     if (Math.abs(d.angle) > 0.5 && groupRotationValid(d.angle, d)) {
       moveHistory.push(snapshot());
       const rotated = groupRotatedPlacements(d, d.angle);
